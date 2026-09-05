@@ -148,5 +148,3 @@ All components use free tiers or open-source tools:
 - Historical event database
 - Machine learning for host galaxy prioritization
 - SMS/email notification integration (Twilio/SendGrid)
-
-</ARG>

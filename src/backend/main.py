@@ -204,6 +204,29 @@ async def health_check():
     return {"status": "healthy", "observatory": OBSERVATORY_NAME, "primary_llm": PRIMARY_LLM}
 
 
+# --- Frontend static serving (single-container Render deploy) ---
+# The Dockerfile copies the compiled Vite build into src/frontend/dist.
+# API routes above take precedence; anything else falls back to the SPA.
+DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+if os.path.isdir(DIST_DIR):
+    assets_dir = os.path.join(DIST_DIR, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_root():
+        return FileResponse(os.path.join(DIST_DIR, "index.html"))
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        if full_path.startswith(("api/", "agent/", "health", "openapi.json", "docs", "redoc")):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = os.path.join(DIST_DIR, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(DIST_DIR, "index.html"))
+
+
 if __name__ == "__main__":
     # Use port from environment for Render compatibility
     port = int(os.getenv("PORT", 8000))

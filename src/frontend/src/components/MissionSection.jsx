@@ -90,5 +90,3 @@ export default function MissionSection() {
     </section>
   )
 }
-
-</ARG>

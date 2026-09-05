@@ -114,5 +114,3 @@ function ApprovalModal({ onClose }) {
 }
 
 export default App
-
-</ARG>

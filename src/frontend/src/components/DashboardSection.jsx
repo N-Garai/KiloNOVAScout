@@ -192,5 +192,3 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     </section>
   )
 }
-
-</ARG>
