@@ -6,9 +6,8 @@ from typing import Dict, Any, List, Optional
 
 from strands import Agent
 from strands.models.litellm import LiteLLMModel
-from strands.models.routing import ModelRouter, RoutingCandidate, FallbackStrategy
 
-from .models import (
+from ..models import (
     GcnKafkaPayload,
     AgentState,
     AgentOutput,
@@ -17,26 +16,27 @@ from .models import (
     ObservatoryWeather,
     TelescopeSlewScript,
 )
-from .tools import KilonovaScoutTools
+from ..tools import KilonovaScoutTools
 
 
-def build_model_router(primary_model: str, fallback_model: str) -> ModelRouter:
-    """Builds a Strands ModelRouter with a LiteLLM primary and fallback.
+def build_primary_model(primary_model: str, fallback_model: str) -> LiteLLMModel:
+    """Builds the LLM model for the agent.
 
     LiteLLM handles provider routing via the model_id prefix
     (e.g. ``gemini/gemini-1.5-flash``, ``groq/llama3-70b-8192``) and reads
     provider API keys from environment variables (``GEMINI_API_KEY``,
     ``GROQ_API_KEY``).
+
+    NOTE: ``strands.models.routing.ModelRouter`` (primary/fallback failover)
+    is only available in newer strands-agents releases than the pinned one
+    and the deterministic pipeline below invokes tools directly without
+    calling the LLM, so a single LiteLLM model is sufficient here. If the
+    primary model id is empty, the fallback model id is used.
     """
-    candidates = []
-    for name, model_id in (("primary", primary_model), ("fallback", fallback_model)):
-        if not model_id:
-            continue
-        model = LiteLLMModel(model_id=model_id, stream=False)
-        candidates.append(RoutingCandidate(model=model, name=name, description=model_id))
-    if not candidates:
+    model_id = primary_model or fallback_model
+    if not model_id:
         raise ValueError("At least one LLM model must be configured (set PRIMARY_LLM).")
-    return ModelRouter(models=candidates, strategy=FallbackStrategy(), max_switches=len(candidates))
+    return LiteLLMModel(model_id=model_id)
 
 
 class KilonovaScoutAgent(Agent):
@@ -51,7 +51,7 @@ class KilonovaScoutAgent(Agent):
     def __init__(self, agent_name: str, tools: KilonovaScoutTools,
                  model: str = "google/gemini-1.5-flash",
                  fallback_model: str = "groq/llama3-70b-8192"):
-        model_router = build_model_router(model, fallback_model)
+        llm_model = build_primary_model(model, fallback_model)
 
         # All tool methods are @tool decorated; Strands accepts them directly.
         strands_tools = [
@@ -64,7 +64,7 @@ class KilonovaScoutAgent(Agent):
 
         super().__init__(
             name=agent_name,
-            model=model_router,
+            model=llm_model,
             tools=strands_tools,
             system_prompt=(
                 "You are KilonovaScout, a Staff-level Space Systems AI orchestrator. "

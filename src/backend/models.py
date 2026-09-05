@@ -47,6 +47,7 @@ class Galaxy(BaseModel):
     # Extended fields from GLADE+ query
     pgc: Optional[str] = Field(None, description="PGC identifier.")
     luminosity_k: Optional[float] = Field(None, description="K-band luminosity.")
+    composite_score: Optional[float] = Field(None, description="Composite prioritization score.")
 
 class ObservatoryWeather(BaseModel):
     """Current weather conditions at an observatory location."""
