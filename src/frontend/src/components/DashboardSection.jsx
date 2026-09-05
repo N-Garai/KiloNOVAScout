@@ -171,17 +171,17 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                 >
                   <div className="flex items-center justify-between mb-2">
                     <div className="font-cosmic text-sm text-cosmic-cyan">
-                      {candidate.galaxy.name}
+                      {candidate.name}
                     </div>
                     <div className="font-mono text-xs text-green-400">
-                      Priority: {candidate.priority_score.toFixed(2)}
+                      Priority: {candidate.composite_score.toFixed(2)}
                     </div>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-2 font-mono text-xs text-gray-400">
-                    <div>RA: {candidate.galaxy.ra.toFixed(4)}°</div>
-                    <div>Dec: {candidate.galaxy.dec.toFixed(4)}°</div>
-                    <div>Dist: {candidate.galaxy.distance_mpc} Mpc</div>
-                    <div>Prob: {(candidate.galaxy.probability * 100).toFixed(0)}%</div>
+                    <div>RA: {candidate.ra.toFixed(4)}°</div>
+                    <div>Dec: {candidate.dec.toFixed(4)}°</div>
+                    <div>Dist: {candidate.distance_mpc} Mpc</div>
+                    <div>Prob: {(candidate.probability * 100).toFixed(0)}%</div>
                   </div>
                 </div>
               ))}

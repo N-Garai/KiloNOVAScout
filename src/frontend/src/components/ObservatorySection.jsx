@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, useInView } from 'framer-motion'
 import {
   ComposableMap,
@@ -7,9 +7,15 @@ import {
   Marker,
   ZoomableGroup
 } from 'react-simple-maps'
+import { geoMercator } from 'd3-geo'
 import axios from 'axios'
 
 const GEO_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json'
+
+// ComposableMap renders into an 800x600 viewBox by default; mirror its
+// projection here so map clicks can be converted back to lon/lat.
+const MAP_VIEWBOX = { width: 800, height: 600 }
+const MAP_SCALE = 140
 
 // Palomar Observatory coordinates as default
 const DEFAULT_OBS = {
@@ -17,20 +23,6 @@ const DEFAULT_OBS = {
   lat: 33.356,
   lon: -116.865,
   alt: 1706,
-}
-
-// Reverse geocode to get a rough location name from coordinates
-const reverseGeocode = async (lat, lon) => {
-  try {
-    const res = await axios.get(
-      `https://geocoding-api.open-meteo.com/v1/search?name=&latitude=${lat}&longitude=${lon}&count=1&language=en&format=json`,
-      { timeout: 3000 }
-    )
-    // Open-Meteo geocoding doesn't do reverse, so we just format coords
-    return null
-  } catch {
-    return null
-  }
 }
 
 export default function ObservatorySection() {
@@ -42,6 +34,7 @@ export default function ObservatorySection() {
   const [loading, setLoading] = useState(false)
   const [mapZoom, setMapZoom] = useState(1)
   const ref = useRef(null)
+  const mapWrapRef = useRef(null)
   const isInView = useInView(ref, { once: true, margin: '-100px' })
 
   // Fetch current config on mount
@@ -57,16 +50,36 @@ export default function ObservatorySection() {
       .catch(() => {})
   }, [])
 
-  const handleMapClick = useCallback((geo, projection) => (evt) => {
-    if (!projection || typeof projection.invert !== 'function') return;
-    const [x, y] = projection.invert([evt.clientX, evt.clientY])
-    if (x !== undefined && y !== undefined && !isNaN(x) && !isNaN(y)) {
-      const lon = Math.round(x * 1000) / 1000
-      const lat = Math.round(y * 1000) / 1000
-      setPickedPos({ lat, lon })
-      setSaved(false)
-    }
-  }, [])
+  // Click anywhere on the map to move the observatory marker there.
+  // Inverts the same Mercator projection ComposableMap uses internally.
+  const handleMapSelect = (evt) => {
+    const node = mapWrapRef.current
+    if (!node) return
+    const rect = node.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+    const x = ((evt.clientX - rect.left) / rect.width) * MAP_VIEWBOX.width
+    const y = ((evt.clientY - rect.top) / rect.height) * MAP_VIEWBOX.height
+    const projection = geoMercator()
+      .scale(MAP_SCALE)
+      .translate([MAP_VIEWBOX.width / 2, MAP_VIEWBOX.height / 2])
+      .center([pickedPos.lon, pickedPos.lat])
+    const coords = projection.invert([x, y])
+    if (!coords || coords.some((v) => v === undefined || isNaN(v))) return
+    const lon = Math.round(Math.max(-180, Math.min(180, coords[0])) * 1000) / 1000
+    const lat = Math.round(Math.max(-90, Math.min(90, coords[1])) * 1000) / 1000
+    setPickedPos({ lat, lon })
+    setSaved(false)
+  }
+
+  const handleCoordChange = (key, rawValue) => {
+    const v = parseFloat(rawValue)
+    if (isNaN(v)) return
+    const clamped = key === 'lat'
+      ? Math.max(-90, Math.min(90, v))
+      : Math.max(-180, Math.min(180, v))
+    setPickedPos((prev) => ({ ...prev, [key]: Math.round(clamped * 1000) / 1000 }))
+    setSaved(false)
+  }
 
   const handleSave = async () => {
     setLoading(true)
@@ -119,8 +132,8 @@ export default function ObservatorySection() {
             <span className="text-cosmic-magenta">COORDINATES</span>
           </h2>
           <p className="text-gray-400 font-grotesk text-lg max-w-2xl mx-auto">
-            Click anywhere on the world map to pin your observatory location.
-            Lat/Lon is calculated automatically from your selection.
+            Click anywhere on the world map to pin your observatory location,
+            or type the coordinates directly — both stay in sync.
             Falls back to <span className="text-cosmic-cyan font-bold">Palomar</span> if no custom location is set.
           </p>
         </motion.div>
@@ -133,7 +146,12 @@ export default function ObservatorySection() {
             transition={{ duration: 0.9, delay: 0.2 }}
             className="lg:col-span-2 glass rounded-2xl p-4 border border-cosmic-cyan/20 overflow-hidden"
           >
-            <div className="relative" style={{ aspectRatio: '2/1' }}>
+            <div
+              ref={mapWrapRef}
+              onClick={handleMapSelect}
+              className="relative cursor-crosshair"
+              style={{ aspectRatio: '2/1' }}
+            >
               <ComposableMap
                 projection="geoMercator"
                 projectionConfig={{
@@ -152,7 +170,6 @@ export default function ObservatorySection() {
                         <Geography
                           key={geo.rsmKey}
                           geography={geo}
-                          onClick={handleMapClick(geo, null)}
                           style={{
                             default: {
                               fill: 'rgba(0, 245, 255, 0.05)',
@@ -257,24 +274,44 @@ export default function ObservatorySection() {
               />
             </div>
 
-            {/* Latitude (read-only, auto-calculated) */}
+            {/* Latitude (editable — stays in sync with the map marker) */}
             <div className="mb-5">
               <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
-                Latitude <span className="text-cosmic-cyan">(auto-calculated)</span>
+                Latitude
               </label>
-              <div className="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2.5 text-sm font-mono">
-                <span className="text-cosmic-cyan">{pickedPos.lat.toFixed(6)}°</span>
-              </div>
+              <input
+                type="number"
+                step="0.001"
+                min="-90"
+                max="90"
+                value={pickedPos.lat}
+                onChange={(e) => handleCoordChange('lat', e.target.value)}
+                placeholder="e.g. 33.356"
+                className="w-full bg-black/60 border border-cosmic-cyan/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-cyan/60 focus:ring-1 focus:ring-cosmic-cyan/30
+                           transition-all"
+              />
             </div>
 
-            {/* Longitude (read-only, auto-calculated) */}
+            {/* Longitude (editable — stays in sync with the map marker) */}
             <div className="mb-5">
               <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
-                Longitude <span className="text-cosmic-magenta">(auto-calculated)</span>
+                Longitude
               </label>
-              <div className="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2.5 text-sm font-mono">
-                <span className="text-cosmic-magenta">{pickedPos.lon.toFixed(6)}°</span>
-              </div>
+              <input
+                type="number"
+                step="0.001"
+                min="-180"
+                max="180"
+                value={pickedPos.lon}
+                onChange={(e) => handleCoordChange('lon', e.target.value)}
+                placeholder="e.g. -116.865"
+                className="w-full bg-black/60 border border-cosmic-magenta/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-magenta/60 focus:ring-1 focus:ring-cosmic-magenta/30
+                           transition-all"
+              />
             </div>
 
             {/* Altitude */}

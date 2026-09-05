@@ -116,44 +116,6 @@ export default function ArchitectureSection() {
             </motion.div>
           ))}
         </div>
-
-        {/* Tech stack */}
-        <motion.div
-          initial={{ opacity: 0, y: 30 }}
-          animate={isInView ? { opacity: 1, y: 0 } : {}}
-          transition={{ duration: 0.8, delay: 1 }}
-          className="mt-16 glass rounded-2xl p-8 border border-white/10"
-        >
-          <h3 className="font-cosmic text-2xl font-bold text-center mb-8 text-cosmic-cyan">
-            TECH STACK
-          </h3>
-          <div className="grid md:grid-cols-3 gap-6 text-center">
-            <div>
-              <div className="font-cosmic text-sm text-cosmic-magenta mb-2">BACKEND</div>
-              <div className="font-mono text-xs text-gray-300 space-y-1">
-                <div>FastAPI + Strands SDK</div>
-                <div>LiteLLM → Gemini Flash</div>
-                <div>Astropy + Healpy</div>
-              </div>
-            </div>
-            <div>
-              <div className="font-cosmic text-sm text-cosmic-cyan mb-2">FRONTEND</div>
-              <div className="font-mono text-xs text-gray-300 space-y-1">
-                <div>React 18 + Vite</div>
-                <div>Tailwind CSS v4</div>
-                <div>Framer Motion + Three.js</div>
-              </div>
-            </div>
-            <div>
-              <div className="font-cosmic text-sm text-cosmic-purple mb-2">HOSTING</div>
-              <div className="font-mono text-xs text-gray-300 space-y-1">
-                <div>Render (Free Tier)</div>
-                <div>Docker Multi-Stage</div>
-                <div>100% Zero-Cost</div>
-              </div>
-            </div>
-          </div>
-        </motion.div>
       </div>
     </section>
   )

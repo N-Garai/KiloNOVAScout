@@ -16,18 +16,6 @@ export default function HeroSection() {
       </div>
 
       <div className="relative z-10 text-center max-w-5xl">
-        <motion.div
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8 }}
-        >
-          <div className="inline-block mb-6 px-4 py-2 glass rounded-full border border-cosmic-cyan/30">
-            <span className="font-mono text-xs text-cosmic-cyan">
-              AWS AGENTS FOR HUMANS HACKATHON 2026
-            </span>
-          </div>
-        </motion.div>
-
         <motion.h1
           initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
@@ -75,26 +63,6 @@ export default function HeroSection() {
           >
             VIEW ARCHITECTURE
           </a>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 1, delay: 1.2 }}
-          className="mt-16 flex flex-wrap gap-6 justify-center text-xs font-mono text-gray-500"
-        >
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span>LISTENING TO NASA GCN</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-cosmic-cyan" />
-            <span>STRANDS AGENTS SDK</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-cosmic-magenta" />
-            <span>100% FREE STACK</span>
-          </div>
         </motion.div>
       </div>
     </section>

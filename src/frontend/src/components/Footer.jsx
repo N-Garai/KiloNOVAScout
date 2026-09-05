@@ -16,19 +16,8 @@ export default function Footer() {
           <p className="font-grotesk text-gray-400 mb-6">
             Autonomous Multi-Messenger Astronomy Targeting Agent
           </p>
-          <div className="flex flex-wrap gap-6 justify-center mb-8 font-mono text-xs text-gray-500">
-            <a href="https://strandsagents.com" target="_blank" rel="noopener noreferrer" className="hover:text-cosmic-cyan transition-colors">
-              Strands Agents SDK
-            </a>
-            <span>•</span>
-            <a href="https://github.com" target="_blank" rel="noopener noreferrer" className="hover:text-cosmic-cyan transition-colors">
-              GitHub Repository
-            </a>
-            <span>•</span>
-            <span>MIT License</span>
-          </div>
           <div className="font-mono text-xs text-gray-600">
-            Built for AWS Agents for Humans Hackathon 2026
+            © 2026 KiloNOVAScout · All rights reserved
           </div>
         </motion.div>
       </div>
