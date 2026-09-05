@@ -58,6 +58,7 @@ export default function ObservatorySection() {
   }, [])
 
   const handleMapClick = useCallback((geo, projection) => (evt) => {
+    if (!projection || typeof projection.invert !== 'function') return;
     const [x, y] = projection.invert([evt.clientX, evt.clientY])
     if (x !== undefined && y !== undefined && !isNaN(x) && !isNaN(y)) {
       const lon = Math.round(x * 1000) / 1000

@@ -13,12 +13,32 @@ from .simulator.event_simulator import EventSimulator
 
 # --- Configuration (Load from Environment with Robust Fallbacks) ---
 
+def _get_float(name: str, default: float) -> float:
+    """Read a float env var, falling back to default on missing/garbage values."""
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_port(default: int = 8000) -> int:
+    """Read the PORT env var, falling back to default on missing/garbage values.
+
+    Render normally injects a numeric PORT, but a misconfigured value
+    (e.g. PORT="0.0.0.0") must never crash the boot.
+    """
+    try:
+        port = int(os.getenv("PORT", default))
+    except (TypeError, ValueError):
+        return default
+    return port if 1 <= port <= 65535 else default
+
 # Observatory Configuration
 # Falls back to Palomar Observatory (California) if not provided
 OBSERVATORY_NAME = os.getenv("OBSERVATORY_NAME", "Palomar")
-OBSERVATORY_LAT = float(os.getenv("OBSERVATORY_LAT", 33.356))
-OBSERVATORY_LON = float(os.getenv("OBSERVATORY_LON", -116.865))
-OBSERVATORY_ALT = float(os.getenv("OBSERVATORY_ALT", 1706))
+OBSERVATORY_LAT = _get_float("OBSERVATORY_LAT", 33.356)
+OBSERVATORY_LON = _get_float("OBSERVATORY_LON", -116.865)
+OBSERVATORY_ALT = _get_float("OBSERVATORY_ALT", 1706)
 
 # LLM Configuration
 PRIMARY_LLM = os.getenv("PRIMARY_LLM", "gemini/gemini-1.5-flash")
@@ -228,6 +248,5 @@ if os.path.isdir(DIST_DIR):
 
 
 if __name__ == "__main__":
-    # Use port from environment for Render compatibility
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Use port from environment for Render compatibility (never crash on bad values)
+    uvicorn.run(app, host="0.0.0.0", port=_get_port())
