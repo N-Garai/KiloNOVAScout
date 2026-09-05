@@ -2,7 +2,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 strands-agents==0.1.0
 strands-agents-tools==0.1.0
-litellm==1.48.0
+litellm>=1.73.1
 astropy-healpix==1.7.0
 astropy==6.1.4
 numpy==1.26.4
