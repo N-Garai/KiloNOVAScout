@@ -10,7 +10,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
-    libatlas-base-dev \
+    libopenblas-dev \
     gfortran \
     && rm -rf /var/lib/apt/lists/*
 
