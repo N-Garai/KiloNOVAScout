@@ -52,13 +52,37 @@ export default function ObservatorySection() {
 
   // Click anywhere on the map to move the observatory marker there.
   // Inverts the same Mercator projection ComposableMap uses internally.
+  // NOTE: the SVG letterboxes (preserveAspectRatio meet) inside the 2:1
+  // wrapper, so client pixels must be mapped through the SVG's own
+  // viewBox — mapping across the wrapper rect shifts the marker sideways.
   const handleMapSelect = (evt) => {
     const node = mapWrapRef.current
     if (!node) return
-    const rect = node.getBoundingClientRect()
+    const svg = node.querySelector('svg')
+    if (!svg) return
+    const rect = svg.getBoundingClientRect()
     if (!rect.width || !rect.height) return
-    const x = ((evt.clientX - rect.left) / rect.width) * MAP_VIEWBOX.width
-    const y = ((evt.clientY - rect.top) / rect.height) * MAP_VIEWBOX.height
+
+    let x, y
+    const vb = svg.viewBox && svg.viewBox.baseVal
+    if (vb && vb.width && vb.height) {
+      // xMidYMid meet (SVG default): content centered, possible side bands.
+      const scale = Math.min(rect.width / vb.width, rect.height / vb.height)
+      if (!scale) return
+      const offsetX = (rect.width - vb.width * scale) / 2
+      const offsetY = (rect.height - vb.height * scale) / 2
+      x = vb.x + (evt.clientX - rect.left - offsetX) / scale
+      y = vb.y + (evt.clientY - rect.top - offsetY) / scale
+      // Clicks landing in the letterbox bands are outside the map.
+      if (x < vb.x || y < vb.y || x > vb.x + vb.width || y > vb.y + vb.height) return
+    } else {
+      // No viewBox: fall back to stretching across the rendered box.
+      const w = parseFloat(svg.getAttribute('width')) || rect.width
+      const h = parseFloat(svg.getAttribute('height')) || rect.height
+      x = ((evt.clientX - rect.left) / rect.width) * w
+      y = ((evt.clientY - rect.top) / rect.height) * h
+    }
+
     const projection = geoMercator()
       .scale(MAP_SCALE)
       .translate([MAP_VIEWBOX.width / 2, MAP_VIEWBOX.height / 2])
