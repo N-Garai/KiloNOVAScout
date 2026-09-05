@@ -10,6 +10,7 @@ to a strands.Agent as callable tools.
 import datetime
 import io
 import json
+import os
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
@@ -23,12 +24,18 @@ from astropy.time import Time
 from astropy import units as u
 from strands import tool
 
-from ..models import HealpixSkymap, Galaxy, ObservatoryWeather, TelescopeSlewScript, AgentOutput
+from ..models import (
+    HealpixSkymap,
+    Galaxy,
+    ObservatoryWeather,
+    TelescopeSlewScript,
+    AgentOutput,
+    ScoreBreakdown,
+)
 
 
 def _load_scoring_weights() -> dict:
     """Load scoring weights from config/ with a robust fallback."""
-    import sys, os
     try:
         from config import load_scoring_weights as _loader
         return _loader()
@@ -162,6 +169,23 @@ class KilonovaScoutTools:
             )
 
             galaxy.composite_score = composite_score
+            galaxy.score_breakdown = ScoreBreakdown(
+                weights={
+                    "spatial_prior": weights.get('spatial_prior', 1.0),
+                    "galaxy_mass_prior": weights.get('galaxy_mass_prior', 0.6),
+                    "airmass_penalty": weights.get('airmass_penalty', 0.2),
+                    "cloud_cover_penalty": weights.get('cloud_cover_penalty', 0.5),
+                    "grb_coincidence_boost": weights.get('grb_coincidence_boost', 3.0),
+                },
+                terms={
+                    "spatial": P_spatial,
+                    "mass": float(np.log10(L_ratio + 1e-12)),
+                    "airmass": X_i,
+                    "cloud": f_cloud,
+                    "grb_boost": B_i,
+                },
+                total=float(composite_score),
+            )
 
         return sorted(mock_galaxies, key=lambda g: getattr(g, 'composite_score', 0), reverse=True)[:5]
 

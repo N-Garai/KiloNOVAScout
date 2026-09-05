@@ -36,6 +36,12 @@ class HealpixSkymap(BaseModel):
     supercell_indices: List[int] = Field(..., description="Indices of significant HEALPix supercells.")
     localization_area_sq_deg: float = Field(..., description="Area of localization in square degrees.")
 
+class ScoreBreakdown(BaseModel):
+    """Term-level audit trail for one candidate's composite score."""
+    weights: Dict[str, float] = Field(..., description="Weights used for this calculation.")
+    terms: Dict[str, float] = Field(..., description="Raw term contributions before weighting.")
+    total: float = Field(..., description="Final composite score.")
+
 class Galaxy(BaseModel):
     """Represents a potential host galaxy from the GLADE+ catalog."""
     name: str = Field(..., description="Galaxy common name or identifier.")
@@ -48,6 +54,8 @@ class Galaxy(BaseModel):
     pgc: Optional[str] = Field(None, description="PGC identifier.")
     luminosity_k: Optional[float] = Field(None, description="K-band luminosity.")
     composite_score: Optional[float] = Field(None, description="Composite prioritization score.")
+    score_breakdown: Optional[ScoreBreakdown] = Field(None, description="Per-candidate scoring audit trail.")
+    normalized_priority: Optional[float] = Field(None, description="Normalized 0-100 priority across the run.")
 
 class ObservatoryWeather(BaseModel):
     """Current weather conditions at an observatory location."""
@@ -77,6 +85,36 @@ class AgentState(BaseModel):
     slew_script: Optional[TelescopeSlewScript] = Field(None, description="Generated telescope slew script.")
     approval_needed: bool = Field(False, description="True if human approval is required for the script.")
     timestamp: datetime.datetime = Field(default_factory=datetime.datetime.utcnow, description="Last update timestamp.")
+    source: Optional[str] = Field(None, description="Event source: live or mock.")
+    llm_rationale: Optional[str] = Field(None, description="Live LLM triage/justification text.")
+    run_id: Optional[str] = Field(None, description="Current run identifier.")
+
+class StepEvent(BaseModel):
+    """One observed step inside a run."""
+    run_id: str = Field(..., description="Run identifier.")
+    step: int = Field(..., description="Sequential step number.")
+    tool_name: str = Field(..., description="Tool or stage name.")
+    status: str = Field(..., description="running | completed | failed | skipped")
+    attempt: int = Field(..., description="Attempt count for this step.")
+    started_at: str = Field(..., description="ISO start timestamp.")
+    duration_ms: Optional[int] = Field(None, description="Measured duration in milliseconds.")
+    input_summary: str = Field("", description="Short input summary.")
+    output_summary: str = Field("", description="Short output summary.")
+    error: str = Field("", description="Error text if failed.")
+
+class RunRecord(BaseModel):
+    """Persisted ledger for one pipeline run."""
+    run_id: str = Field(..., description="Run identifier.")
+    source: str = Field(..., description="live or mock.")
+    status: str = Field(..., description="Current run status.")
+    started_at: str = Field(..., description="ISO start timestamp.")
+    finished_at: Optional[str] = Field(None, description="ISO finish timestamp.")
+    event: Optional[Dict[str, Any]] = Field(None, description="Event summary.")
+    steps: List[StepEvent] = Field(default_factory=list, description="Ordered step events.")
+    llm_rationale: Optional[str] = Field(None, description="LLM rationale if generated.")
+    candidates: List[Dict[str, Any]] = Field(default_factory=list, description="Final candidate summary.")
+    weather: Optional[Dict[str, Any]] = Field(None, description="Weather snapshot for the run.")
+    slew_script: Optional[str] = Field(None, description="Generated slew script content.")
 
 class AgentOutput(BaseModel):
     """Standard output format for the KilonovaScout agent actions."""

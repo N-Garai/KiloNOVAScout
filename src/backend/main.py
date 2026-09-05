@@ -1,40 +1,62 @@
+"""KilonovaScout Backend API.
+
+Render-compatible FastAPI service exposing:
+- /api/simulate-event
+- /api/agent/config
+- /api/agent/state
+- /api/agent/status
+- /api/latest-event
+- /api/runs/{run_id}/events
+- /api/report/{run_id}
+- /health
+- static frontend SPA serving from /assets and fallback index.html
+"""
+
 import os
 import asyncio
+import logging
+from typing import Optional
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .agents.agent import KilonovaScoutAgent
-from .models import AgentState, GcnKafkaPayload, AgentOutput, TelescopeSlewScript, ObservatoryConfig
+from .agents.agent import KilonovaScoutAgent, run_registry
+from .models import (
+    AgentState,
+    GcnKafkaPayload,
+    AgentOutput,
+    TelescopeSlewScript,
+    ObservatoryConfig,
+    RunRecord,
+    StepEvent,
+)
 from .tools import KilonovaScoutTools
 from .simulator.event_simulator import EventSimulator
+from .run_registry import build_report_markdown
+from .gcn_listener import GcnListener
 
-# --- Configuration (Load from Environment with Robust Fallbacks) ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("kilonovascout")
+
 
 def _get_float(name: str, default: float) -> float:
-    """Read a float env var, falling back to default on missing/garbage values."""
     try:
         return float(os.getenv(name, default))
     except (TypeError, ValueError):
         return default
 
 
-def _get_port(default: int = 8000) -> int:
-    """Read the PORT env var, falling back to default on missing/garbage values.
-
-    Render normally injects a numeric PORT, but a misconfigured value
-    (e.g. PORT="0.0.0.0") must never crash the boot.
-    """
+def _get_port(default: int = 10000) -> int:
     try:
         port = int(os.getenv("PORT", default))
     except (TypeError, ValueError):
         return default
     return port if 1 <= port <= 65535 else default
 
+
 # Observatory Configuration
-# Falls back to Palomar Observatory (California) if not provided
 OBSERVATORY_NAME = os.getenv("OBSERVATORY_NAME", "Palomar")
 OBSERVATORY_LAT = _get_float("OBSERVATORY_LAT", 33.356)
 OBSERVATORY_LON = _get_float("OBSERVATORY_LON", -116.865)
@@ -44,45 +66,37 @@ OBSERVATORY_ALT = _get_float("OBSERVATORY_ALT", 1706)
 PRIMARY_LLM = os.getenv("PRIMARY_LLM", "gemini/gemini-1.5-flash")
 FALLBACK_LLM = os.getenv("FALLBACK_LLM", "groq/llama3-70b-8192")
 
-# --- FastAPI App Setup ---
 app = FastAPI(
     title="KilonovaScout Backend API",
     description="Autonomous Multi-Messenger Astronomy Targeting Agent.",
-    version="1.1.0",
+    version="2.0.0",
 )
 
-# Allow CORS for frontend development and production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict this to your actual Render URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Agent and Tools Initialization ---
-
-# Initialize the Tools with user-provided or fallback location
 kilonova_tools = KilonovaScoutTools(
     observatory_name=OBSERVATORY_NAME,
     lat=OBSERVATORY_LAT,
     lon=OBSERVATORY_LON,
-    alt=OBSERVATORY_ALT
+    alt=OBSERVATORY_ALT,
 )
 
-# Initialize the Agent with primary and fallback model via Strands ModelRouter
 kilonova_agent = KilonovaScoutAgent(
     agent_name="kilonovascout-core",
     tools=kilonova_tools,
-    model=PRIMARY_LLM,
-    fallback_model=FALLBACK_LLM
 )
 
 event_simulator = EventSimulator()
+_latest_run_id: Optional[str] = None
 
 
-def _galaxy_to_dict(g):
-    """Convert a Galaxy pydantic model to the frontend's expected shape."""
+def _galaxy_to_dict(g) -> dict:
     return {
         "name": g.name,
         "ra": g.ra_deg,
@@ -90,24 +104,24 @@ def _galaxy_to_dict(g):
         "distance_mpc": g.distance_mpc,
         "probability": g.probability_overlap,
         "composite_score": getattr(g, "composite_score", 0.0),
+        "normalized_priority": getattr(g, "normalized_priority", None),
+        "score_breakdown": getattr(g, "score_breakdown", None),
     }
 
 
-def _build_simulate_response(agent_output: AgentOutput) -> dict:
-    """Build the frontend contract for /api/simulate-event."""
+def _build_simulate_response(agent_output, run_id: str) -> dict:
     details = agent_output.details if agent_output.details else {}
-    galaxies_raw = (kilonova_agent.agent_state.candidate_galaxies
-                    if kilonova_agent.agent_state.candidate_galaxies else [])
+    galaxies_raw = kilonova_agent.agent_state.candidate_galaxies or []
     galaxies = [_galaxy_to_dict(g) for g in galaxies_raw]
 
-    status_map = {
+    status = {
         "awaiting_approval": "target_acquired",
         "weather_blocked": "monitoring",
         "processing": "processing",
         "error": "error",
         "listening": "listening",
-    }
-    status = status_map.get(kilonova_agent.agent_state.status, "processing")
+        "rejected": "rejected",
+    }.get(kilonova_agent.agent_state.status, "processing")
 
     return {
         "alert": {
@@ -116,47 +130,38 @@ def _build_simulate_response(agent_output: AgentOutput) -> dict:
             "ivorn": kilonova_agent.agent_state.last_gcn_event or "GW170817",
             "distance_mpc": 40.8,
             "confidence": 90.0,
-            "observatory": kilonova_agent.agent_state.observatory_weather.observatory_name
-                           if kilonova_agent.agent_state.observatory_weather else "Palomar",
+            "observatory": kilonova_agent.agent_state.observatory_weather.observatory_name if kilonova_agent.agent_state.observatory_weather else OBSERVATORY_NAME,
+            "source": kilonova_agent.agent_state.source or "mock",
         },
         "status": status,
         "candidates": galaxies,
-        "execution_traces": [
-            {"step": 1, "tool_name": "astropy_healpix.cone_search", "status": "completed", "duration_ms": 120},
-            {"step": 2, "tool_name": "glade.catalog_query", "status": "completed", "duration_ms": 240},
-            {"step": 3, "tool_name": "open_meteo.cloud_cover", "status": "completed", "duration_ms": 60},
-            {"step": 4, "tool_name": "ascom_indi.slew_script", "status": "completed", "duration_ms": 30},
-        ],
+        "execution_traces": kilonova_agent.get_execution_traces(),
         "message": agent_output.message,
         "slew_script": details.get("slew_script", ""),
+        "run_id": run_id,
+        "llm_rationale": kilonova_agent.agent_state.llm_rationale,
     }
 
 
-# --- API Endpoints ---
-
-@app.get("/agent/config", response_model=ObservatoryConfig)
+@app.get("/agent/config")
 async def get_agent_config():
-    """Get the current observatory configuration."""
     return ObservatoryConfig(
         name=OBSERVATORY_NAME,
         lat=OBSERVATORY_LAT,
         lon=OBSERVATORY_LON,
-        alt=OBSERVATORY_ALT
+        alt=OBSERVATORY_ALT,
     )
 
 
-@app.put("/agent/config", response_model=ObservatoryConfig)
+@app.put("/agent/config")
 async def update_agent_config(config: ObservatoryConfig):
-    """Update observatory configuration dynamically."""
     global kilonova_tools, kilonova_agent, OBSERVATORY_NAME, OBSERVATORY_LAT, OBSERVATORY_LON, OBSERVATORY_ALT
 
-    # Apply fallback to Palomar if values are missing or invalid
     new_name = config.name if config.name and config.name.strip() else "Palomar"
     new_lat = config.lat if config.lat is not None else 33.356
     new_lon = config.lon if config.lon is not None else -116.865
     new_alt = config.alt if config.alt is not None else 1706
 
-    # Clamp lat/lon to valid ranges
     new_lat = max(-90.0, min(90.0, new_lat))
     new_lon = max(-180.0, min(180.0, new_lon))
 
@@ -165,68 +170,132 @@ async def update_agent_config(config: ObservatoryConfig):
     OBSERVATORY_LON = new_lon
     OBSERVATORY_ALT = new_alt
 
-    # Re-initialize tools with new location
     kilonova_tools = KilonovaScoutTools(
         observatory_name=OBSERVATORY_NAME,
         lat=OBSERVATORY_LAT,
         lon=OBSERVATORY_LON,
-        alt=OBSERVATORY_ALT
+        alt=OBSERVATORY_ALT,
     )
 
-    # Re-initialize agent with updated tools
     kilonova_agent = KilonovaScoutAgent(
         agent_name="kilonovascout-core",
         tools=kilonova_tools,
-        model=PRIMARY_LLM,
-        fallback_model=FALLBACK_LLM
     )
 
-    print(f"[API] Observatory updated: {OBSERVATORY_NAME} ({OBSERVATORY_LAT}, {OBSERVATORY_LON}, {OBSERVATORY_ALT}m)")
+    logger.info(f"[API] Observatory updated: {OBSERVATORY_NAME} ({OBSERVATORY_LAT}, {OBSERVATORY_LON}, {OBSERVATORY_ALT}m)")
     return ObservatoryConfig(
         name=OBSERVATORY_NAME,
         lat=OBSERVATORY_LAT,
         lon=OBSERVATORY_LON,
-        alt=OBSERVATORY_ALT
+        alt=OBSERVATORY_ALT,
     )
 
 
-@app.get("/agent/state", response_model=AgentState)
+@app.get("/agent/state")
 async def get_agent_state():
-    """Get the current state of the KilonovaScout agent."""
     return kilonova_agent.get_agent_state()
 
 
-@app.post("/simulate-gcn-alert", response_model=AgentOutput)
+@app.get("/agent/status")
+async def get_agent_status():
+    state = kilonova_agent.get_agent_state()
+    return {
+        "status": state.status,
+        "last_gcn_event": state.last_gcn_event,
+        "source": state.source,
+        "run_id": state.run_id,
+        "approval_needed": state.approval_needed,
+    }
+
+
+@app.post("/simulate-gcn-alert")
 async def simulate_gcn_alert():
-    """Simulate a NASA GCN alert (GW170817 template)."""
     mock_payload = event_simulator.get_mock_gw170817_payload()
-    print(f"[API] Simulated GCN delivery: {mock_payload.voevent.ivorn}")
+    logger.info(f"[API] Simulated GCN delivery: {mock_payload.voevent.ivorn}")
     agent_output = await kilonova_agent.process_gcn_event(mock_payload)
-    return agent_output
+    global _latest_run_id
+    _latest_run_id = kilonova_agent.agent_state.run_id
+    return _build_simulate_response(agent_output, _latest_run_id)
 
 
 @app.post("/api/simulate-event")
 async def api_simulate_event():
-    """Frontend-facing simulation endpoint (returns the dashboard contract)."""
     mock_payload = event_simulator.get_mock_gw170817_payload()
-    agent_output = await kilonova_agent.process_gcn_event(mock_payload)
-    return _build_simulate_response(agent_output)
+    agent_output = await kilonova_agent.run_mock_event()
+    global _latest_run_id
+    _latest_run_id = kilonova_agent.agent_state.run_id
+    return _build_simulate_response(agent_output, _latest_run_id)
 
 
-@app.post("/agent/approve-slew-script", response_model=AgentOutput)
+@app.post("/api/simulate-gcn-alert")
+async def api_simulate_gcn_alert():
+    """Legacy alias keeping the previous contract."""
+    return await simulate_gcn_alert()
+
+
+@app.post("/agent/approve-slew-script")
 async def approve_slew_script():
-    """Endpoint for human approval of the telescope script."""
     return await kilonova_agent.approve_slew_script()
+
+
+@app.get("/api/latest-event")
+async def api_latest_event(response: Response):
+    global _latest_run_id
+    run_id = _latest_run_id or kilonova_agent.agent_state.run_id
+    if not run_id:
+        response.status_code = 204
+        return
+    record = await run_registry.get_record(run_id)
+    if not record:
+        response.status_code = 204
+        return
+    return {
+        "run_id": record.run_id,
+        "source": record.source,
+        "status": record.status,
+        "started_at": record.started_at,
+        "finished_at": record.finished_at,
+        "event": record.event,
+        "llm_rationale": record.llm_rationale,
+        "candidates": record.candidates,
+    }
+
+
+@app.get("/api/runs/{run_id}/events")
+async def api_run_events(run_id: str):
+    async def event_stream():
+        queue = await run_registry.subscribe(run_id)
+        while True:
+            step = await queue.get()
+            yield f"data: {step.model_dump_json()}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/report/{run_id}")
+async def api_report(run_id: str):
+    record = await run_registry.get_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        from config import load_scoring_weights as _loader
+        weights = _loader()
+    except Exception:
+        weights = {}
+    markdown = build_report_markdown(record, weights)
+    return {"run_id": run_id, "format": "markdown", "content": markdown}
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "observatory": OBSERVATORY_NAME, "primary_llm": PRIMARY_LLM}
+    return {
+        "status": "healthy",
+        "observatory": OBSERVATORY_NAME,
+        "primary_llm": PRIMARY_LLM,
+        "fallback_llm": FALLBACK_LLM,
+    }
 
 
-# --- Frontend static serving (single-container Render deploy) ---
-# The Dockerfile copies the compiled Vite build into src/frontend/dist.
-# API routes above take precedence; anything else falls back to the SPA.
 DIST_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
 if os.path.isdir(DIST_DIR):
     assets_dir = os.path.join(DIST_DIR, "assets")
@@ -247,6 +316,18 @@ if os.path.isdir(DIST_DIR):
         return FileResponse(os.path.join(DIST_DIR, "index.html"))
 
 
+@app.on_event("startup")
+async def startup() -> None:
+    """Start the GCN listener (non-blocking; mock-only without creds)."""
+    try:
+        loop = asyncio.get_event_loop()
+        listener = GcnListener(on_notice=kilonova_agent.handle_live_notice)
+        asyncio.ensure_future(listener._run())
+        app.state.gcn_listener = listener
+        logger.info("[startup] GCN listener scheduled (mock-only mode if no creds).")
+    except Exception as e:
+        logger.warning(f"[startup] GCN listener start failed (continuing): {e}")
+
+
 if __name__ == "__main__":
-    # Use port from environment for Render compatibility (never crash on bad values)
     uvicorn.run(app, host="0.0.0.0", port=_get_port())
