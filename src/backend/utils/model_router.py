@@ -1,7 +1,7 @@
 import os
 from typing import Dict, Any
 
-from strands_sdk.llm import LiteLLMClient
+from strands.llm import LiteLLMClient
 
 
 def get_llm_client(primary_model: str, fallback_model: str) -> LiteLLMClient:

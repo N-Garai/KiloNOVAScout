@@ -3,7 +3,7 @@ import asyncio
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from strands_sdk.llm import LiteLLMClient
+from strands.llm import LiteLLMClient
 
 from .agents.agent import KilonovaScoutAgent
 from .models import AgentState, GcnKafkaPayload, AgentOutput, TelescopeSlewScript, ObservatoryConfig

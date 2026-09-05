@@ -3,8 +3,8 @@ import json
 import asyncio
 from typing import Dict, Any, List, Optional
 
-from strands_sdk import Agent, Tool, StrandsThreadPoolExecutor
-from strands_sdk.models import AgentContext, AgentStep
+from strands import Agent, Tool, StrandsThreadPoolExecutor
+from strands.models import AgentContext, AgentStep
 
 from .models import GcnKafkaPayload, AgentState, AgentOutput, HealpixSkymap, Galaxy, ObservatoryWeather, TelescopeSlewScript
 from .tools import KilonovaScoutTools
