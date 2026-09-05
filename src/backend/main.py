@@ -2,9 +2,9 @@
 
 Render-compatible FastAPI service exposing:
 - /api/simulate-event
-- /api/agent/config
-- /api/agent/state
-- /api/agent/status
+- /agent/config
+- /agent/state
+- /agent/status
 - /api/latest-event
 - /api/runs/{run_id}/events
 - /api/report/{run_id}
@@ -48,7 +48,7 @@ def _get_float(name: str, default: float) -> float:
         return default
 
 
-def _get_port(default: int = 10000) -> int:
+def _get_port(default: int = 8000) -> int:
     try:
         port = int(os.getenv("PORT", default))
     except (TypeError, ValueError):
@@ -97,15 +97,18 @@ _latest_run_id: Optional[str] = None
 
 
 def _galaxy_to_dict(g) -> dict:
+    # NOTE: getattr defaults do NOT cover fields that exist but are None,
+    # so coalesce explicitly — the frontend calls .toFixed() unconditionally.
+    score_breakdown = getattr(g, "score_breakdown", None)
     return {
         "name": g.name,
         "ra": g.ra_deg,
         "dec": g.dec_deg,
         "distance_mpc": g.distance_mpc,
         "probability": g.probability_overlap,
-        "composite_score": getattr(g, "composite_score", 0.0),
+        "composite_score": getattr(g, "composite_score", 0.0) or 0.0,
         "normalized_priority": getattr(g, "normalized_priority", None),
-        "score_breakdown": getattr(g, "score_breakdown", None),
+        "score_breakdown": score_breakdown.model_dump() if hasattr(score_breakdown, "model_dump") else score_breakdown,
     }
 
 
@@ -263,8 +266,12 @@ async def api_latest_event(response: Response):
 
 @app.get("/api/runs/{run_id}/events")
 async def api_run_events(run_id: str):
-    async def event_stream():
+    try:
         queue = await run_registry.subscribe(run_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    async def event_stream():
         while True:
             step = await queue.get()
             yield f"data: {step.model_dump_json()}\n\n"

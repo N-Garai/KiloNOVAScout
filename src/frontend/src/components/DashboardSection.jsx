@@ -83,12 +83,17 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
         output_summary: step.output_summary || '',
       }
       if (idx >= 0) {
-        // Keep the running entry's "started" timestamp; update status/duration
-        existing[idx] = { ...existing[idx], ...card }
+        // Never let a stale replayed event regress a finished card:
+        // terminal states win, running only fills an unfinished card.
+        const prevTerminal = ['completed', 'failed', 'skipped'].includes(existing[idx].status)
+        const nextTerminal = ['completed', 'failed', 'skipped'].includes(card.status)
+        if (nextTerminal || !prevTerminal) {
+          existing[idx] = { ...existing[idx], ...card }
+        }
       } else {
         existing.push(card)
       }
-      return existing.filter(e => e.status !== 'running' || e.tool_name === 'run')
+      return existing
     })
   }
 
@@ -245,8 +250,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                     key={`${trace.step}-${trace.tool_name}`}
                     initial={{ opacity: 0, x: -20 }}
                     animate={{ opacity: 1, x: 0 }}
-                    className="flex items-start gap-3"
+                    className="flex flex-col gap-2"
                   >
+                    <div className="flex items-start gap-3">
                     <span className="text-gray-500">[{trace.step}]</span>
                     <span className="text-cosmic-magenta">{trace.tool_name}()</span>
                     <span className={`px-2 py-0.5 rounded text-xs ${
@@ -268,8 +274,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                     >
                       {expandedTrace === `${trace.step}-${trace.tool_name}` ? '▲' : '▼'}
                     </button>
+                    </div>
                     {expandedTrace === `${trace.step}-${trace.tool_name}` && (
-                      <div className="w-full col-span-full mt-2 p-3 bg-black/50 rounded border border-white/5">
+                      <div className="w-full mt-1 p-3 bg-black/50 rounded border border-white/5">
                         {trace.input_summary && (
                           <div className="mb-2">
                             <span className="text-gray-500">in: </span>

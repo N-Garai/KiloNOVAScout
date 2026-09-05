@@ -87,15 +87,18 @@ async def _emit_step(record: RunRecord, *, step: int, tool_name: str, status: st
 
 
 def _galaxy_to_dict(g: Galaxy) -> Dict[str, Any]:
+    # NOTE: getattr defaults do NOT cover fields that exist but are None,
+    # so coalesce explicitly — consumers call .toFixed() unconditionally.
+    score_breakdown = getattr(g, "score_breakdown", None)
     return {
         "name": g.name,
         "ra": g.ra_deg,
         "dec": g.dec_deg,
         "distance_mpc": g.distance_mpc,
         "probability": g.probability_overlap,
-        "composite_score": getattr(g, "composite_score", 0.0),
+        "composite_score": getattr(g, "composite_score", 0.0) or 0.0,
         "normalized_priority": getattr(g, "normalized_priority", None),
-        "score_breakdown": getattr(g, "score_breakdown", None),
+        "score_breakdown": score_breakdown.model_dump() if hasattr(score_breakdown, "model_dump") else score_breakdown,
     }
 
 
@@ -328,10 +331,10 @@ class KilonovaScoutAgent(Agent):
         # Step 6 — validator / GRB coincidence (real tool)
         await stamp(6, "validator.multimessenger", "running", input_s="coincidence checks")
         start = time.perf_counter()
-        grb_boost = 0.0
+        grb_boost = 1.0
         try:
             top = galaxies[0] if galaxies else None
-            gw_time = last_mock_event_time()
+            gw_time = (payload.voevent.wherewhen or {}).get("event_time") or last_mock_event_time()
             grb_catalog = [
                 {"id": "GRB170817A", "time": "2017-08-17T12:41:06", "ra": 197.45, "dec": -23.38, "error_radius_deg": 0.5},
             ]
@@ -340,10 +343,29 @@ class KilonovaScoutAgent(Agent):
                 gw_time, top.ra_deg if top else 0.0, top.dec_deg if top else 0.0,
                 json.dumps(grb_catalog),
             )
-            grb_boost = float(vres.get("priority_boost_factor", 1.0)) if vres.get("coincidence_detected") else 1.0
             await stamp(6, "validator.multimessenger", "completed",
                         output_s=f"coincidence={vres.get('coincidence_detected', False)}",
                         duration_ms=int((time.perf_counter() - start) * 1000))
+            if vres.get("coincidence_detected") and top is not None:
+                # A real coincidence must move the ranking, not just the log:
+                # mirror the tools formula (additive boost, default 3.0).
+                boost = float(vres.get("priority_boost_factor", 3.0))
+                top.composite_score = (getattr(top, "composite_score", 0.0) or 0.0) + boost
+                bd = getattr(top, "score_breakdown", None)
+                if bd is not None:
+                    try:
+                        bd.terms["grb_boost"] = boost
+                        bd.total = float(top.composite_score)
+                    except Exception:
+                        pass
+                galaxies = sorted(
+                    galaxies,
+                    key=lambda g: (getattr(g, "composite_score", 0.0) or 0.0),
+                    reverse=True,
+                )
+                galaxies = normalize_priorities(galaxies)
+                self.agent_state.candidate_galaxies = galaxies
+                grb_boost = boost
         except Exception as exc:
             await stamp(6, "validator.multimessenger", "failed", err=str(exc),
                         duration_ms=int((time.perf_counter() - start) * 1000))

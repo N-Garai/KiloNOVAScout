@@ -149,9 +149,13 @@ class GcnListener:
         try:
             consumer.subscribe(TOPICS_DEFAULT)
             print(f"[GCN] Listening on {len(TOPICS_DEFAULT)} LVC topics...")
+            loop = asyncio.get_running_loop()
             while self._running:
                 try:
-                    for message in consumer.consume(timeout=1.0):
+                    # consumer.consume() blocks in librdkafka — never run it
+                    # directly on the API event loop or requests stall.
+                    messages = await loop.run_in_executor(None, consumer.consume, 1.0)
+                    for message in messages or []:
                         if message is None:
                             continue
                         payload = self._process_message(message)
