@@ -47,5 +47,5 @@ htmlcov/
 *.bak
 *.tmp
 *~
-
+.agent/
 </ARG>

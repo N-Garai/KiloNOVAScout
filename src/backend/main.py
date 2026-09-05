@@ -5,10 +5,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from strands_sdk.llm import LiteLLMClient
 
-from .agent import KilonovaScoutAgent
+from .agents.agent import KilonovaScoutAgent
 from .models import AgentState, GcnKafkaPayload, AgentOutput, TelescopeSlewScript, ObservatoryConfig
 from .tools import KilonovaScoutTools
-from .simulator import EventSimulator
+from .simulator.event_simulator import EventSimulator
 
 # --- Configuration (Load from Environment with Robust Fallbacks) ---
 
@@ -20,8 +20,6 @@ OBSERVATORY_LON = float(os.getenv("OBSERVATORY_LON", -116.865))
 OBSERVATORY_ALT = float(os.getenv("OBSERVATORY_ALT", 1706))
 
 # LLM Configuration
-# Primary: Google Gemini 1.5 Flash (Fast and high rate limits)
-# Fallback: Groq Llama 3 (Ultra-fast, useful if Google API is down)
 PRIMARY_LLM = os.getenv("PRIMARY_LLM", "google/gemini-1.5-flash")
 FALLBACK_LLM = os.getenv("FALLBACK_LLM", "groq/llama3-70b-8192")
 
@@ -52,7 +50,6 @@ kilonova_tools = KilonovaScoutTools(
 )
 
 # Initialize the Agent with Primary and Fallback model capability
-# Note: The custom logic for fallback is handled within the Agent's process loop
 kilonova_agent = KilonovaScoutAgent(
     agent_name="kilonovascout-core",
     tools=kilonova_tools,
@@ -64,51 +61,45 @@ event_simulator = EventSimulator()
 
 # --- API Endpoints ---
 
-# Store current observatory config (mutable state for runtime updates)
-_current_config = {
-    "name": OBSERVATORY_NAME,
-    "lat": OBSERVATORY_LAT,
-    "lon": OBSERVATORY_LON,
-    "alt": OBSERVATORY_ALT,
-}
-
 @app.get("/agent/config", response_model=ObservatoryConfig)
 async def get_agent_config():
     """Get the current observatory configuration."""
-    return ObservatoryConfig(**_current_config)
+    # Return a Pydantic model instance for proper serialization
+    return ObservatoryConfig(
+        name=OBSERVATORY_NAME, 
+        lat=OBSERVATORY_LAT, 
+        lon=OBSERVATORY_LON, 
+        alt=OBSERVATORY_ALT
+    )
 
 @app.put("/agent/config", response_model=ObservatoryConfig)
 async def update_agent_config(config: ObservatoryConfig):
-    """Update observatory configuration dynamically.
-    Falls back to Palomar if values are missing or invalid.
-    """
-    global kilonova_tools, kilonova_agent, _current_config
-
-    # Apply fallback to Palomar for any invalid/missing data
+    """Update observatory configuration dynamically."""
+    global kilonova_tools, kilonova_agent, OBSERVATORY_NAME, OBSERVATORY_LAT, OBSERVATORY_LON, OBSERVATORY_ALT
+    
+    # Apply fallback to Palomar if values are missing or invalid
     new_name = config.name if config.name and config.name.strip() else "Palomar"
     new_lat = config.lat if config.lat is not None else 33.356
     new_lon = config.lon if config.lon is not None else -116.865
     new_alt = config.alt if config.alt is not None else 1706
-
+    
     # Clamp lat/lon to valid ranges
     new_lat = max(-90.0, min(90.0, new_lat))
     new_lon = max(-180.0, min(180.0, new_lon))
-
-    _current_config = {
-        "name": new_name,
-        "lat": new_lat,
-        "lon": new_lon,
-        "alt": new_alt,
-    }
+    
+    OBSERVATORY_NAME = new_name
+    OBSERVATORY_LAT = new_lat
+    OBSERVATORY_LON = new_lon
+    OBSERVATORY_ALT = new_alt
 
     # Re-initialize tools with new location
     kilonova_tools = KilonovaScoutTools(
-        observatory_name=new_name,
-        lat=new_lat,
-        lon=new_lon,
-        alt=new_alt
+        observatory_name=OBSERVATORY_NAME,
+        lat=OBSERVATORY_LAT,
+        lon=OBSERVATORY_LON,
+        alt=OBSERVATORY_ALT
     )
-
+    
     # Re-initialize agent with updated tools
     kilonova_agent = KilonovaScoutAgent(
         agent_name="kilonovascout-core",
@@ -116,9 +107,14 @@ async def update_agent_config(config: ObservatoryConfig):
         llm_model=PRIMARY_LLM,
         fallback_llm=FALLBACK_LLM
     )
-
-    print(f"[API] Observatory updated: {new_name} ({new_lat}, {new_lon}, {new_alt}m)")
-    return ObservatoryConfig(**_current_config)
+    
+    print(f"[API] Observatory updated: {OBSERVATORY_NAME} ({OBSERVATORY_LAT}, {OBSERVATORY_LON}, {OBSERVATORY_ALT}m)")
+    return ObservatoryConfig(
+        name=OBSERVATORY_NAME,
+        lat=OBSERVATORY_LAT,
+        lon=OBSERVATORY_LON,
+        alt=OBSERVATORY_ALT
+    )
 
 @app.get("/agent/state", response_model=AgentState)
 async def get_agent_state():

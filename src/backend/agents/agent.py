@@ -1,8 +1,7 @@
-
 import datetime
 import json
 import asyncio
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Optional
 
 from strands_sdk import Agent, Tool, StrandsThreadPoolExecutor
 from strands_sdk.models import AgentContext, AgentStep
@@ -10,10 +9,12 @@ from strands_sdk.models import AgentContext, AgentStep
 from .models import GcnKafkaPayload, AgentState, AgentOutput, HealpixSkymap, Galaxy, ObservatoryWeather, TelescopeSlewScript
 from .tools import KilonovaScoutTools
 
+
 class KilonovaScoutAgent(Agent):
-    """Autonomous Multi-Messenger Astronomy Targeting Agent.
+    """Master Orchestrator Agent for KilonovaScout.
     
-    Robustly handles GCN events with LLM fallback capability.
+    Coordinates the 8 specialized agents through the Strands A2A protocol
+    and manages the end-to-end follow-up pipeline.
     """
 
     def __init__(self, agent_name: str, tools: KilonovaScoutTools, 
@@ -26,10 +27,12 @@ class KilonovaScoutAgent(Agent):
         self.agent_state = AgentState(status="initialized", approval_needed=False)
 
         self.system_message = (
-            "You are KilonovaScout, a Staff-level Space Systems AI. "
-            "Process NASA GCN alerts. Calculate volume, query GLADE+ catalog, "
-            "check weather, and generate XML slew scripts. "
-            "Only request human approval once the script is ready."
+            "You are KilonovaScout, a Staff-level Space Systems AI orchestrator. "
+            "Coordinate specialized agents to process NASA GCN alerts. "
+            "The pipeline: Ingestion -> HEALPix Triage -> Galaxy Crossmatch -> "
+            "Ephemeris/Weather validation -> Multi-Messenger Coincidence -> "
+            "Scheduling -> Human Approval. "
+            "Only request human approval once the slew script is ready."
         )
 
         self.register_tools(
@@ -74,11 +77,11 @@ class KilonovaScoutAgent(Agent):
         self.agent_state.status = "processing"
         self.agent_state.last_gcn_event = event_ivorn
 
-        # Step 1: Geometry
+        # Step 1: Geometry - Parse HEALPix skymap
         skymap: HealpixSkymap = await self.call_tool("parse_healpix_map", skymap_url=skymap_url)
         self.agent_state.current_skymap = skymap
         
-        # Step 2: Catalog Search
+        # Step 2: Catalog Search - Query GLADE+
         galaxies: List[Galaxy] = await self.call_tool("query_glade_catalog", skymap=skymap)
         self.agent_state.candidate_galaxies = galaxies
         

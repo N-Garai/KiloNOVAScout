@@ -1,37 +1,62 @@
-# Multi-stage Dockerfile for KiloNOVAScout
-# Stage 1: Build frontend
-FROM node:20-alpine AS frontend-builder
+# Multi-stage Dockerfile for KilonovaScout
+# Optimized for Render Free Tier (512MB RAM)
 
-WORKDIR /app/src/frontend
-COPY src/frontend/package*.json ./
-RUN npm ci
-COPY src/frontend/ ./
-RUN npm run build
-
-# Stage 2: Python backend with built frontend
-FROM python:3.11-slim
+# ---- Build Stage ----
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    g++ \
+    libatlas-base-dev \
+    gfortran \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements first for better caching
+COPY src/backend/requirements.txt .
+
 # Install Python dependencies
-COPY src/backend/requirements.txt ./src/backend/
-RUN pip install --no-cache-dir -r src/backend/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
+# Copy source code
 COPY src/backend/ ./src/backend/
+COPY config/ ./config/
 
-# Copy built frontend from stage 1
-COPY --from=frontend-builder /app/src/frontend/dist ./src/frontend/dist
+# ---- Runtime Stage ----
+FROM python:3.11-slim AS runtime
 
-# Expose ports
+WORKDIR /app
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash appuser
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application code
+COPY --from=builder /app/src/backend ./src/backend
+COPY --from=builder /app/config ./config
+
+# Set ownership
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src/backend \
+    PORT=8000
+
+# Expose port
 EXPOSE 8000
 
-# Start backend (serves frontend as static files)
-CMD ["uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
-</ARG>
+# Run the application
+CMD ["python", "-u", "src/backend/main.py"]

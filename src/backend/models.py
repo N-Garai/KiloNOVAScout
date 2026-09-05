@@ -44,6 +44,9 @@ class Galaxy(BaseModel):
     redshift: float = Field(..., description="Redshift of the galaxy.")
     distance_mpc: float = Field(..., description="Luminosity distance in Mpc.")
     probability_overlap: float = Field(..., description="Overlap probability with the GW skymap.")
+    # Extended fields from GLADE+ query
+    pgc: Optional[str] = Field(None, description="PGC identifier.")
+    luminosity_k: Optional[float] = Field(None, description="K-band luminosity.")
 
 class ObservatoryWeather(BaseModel):
     """Current weather conditions at an observatory location."""
@@ -52,6 +55,8 @@ class ObservatoryWeather(BaseModel):
     longitude: float = Field(..., description="Longitude of the observatory.")
     cloud_cover_percent: float = Field(..., description="Cloud cover percentage (0-100).")
     seeing_conditions: str = Field(..., description="Qualitative seeing conditions (e.g., 'clear', 'partly cloudy', 'overcast').")
+    humidity_pct: float = Field(0.0, description="Relative humidity percentage.")
+    dome_safe: bool = Field(False, description="Whether dome environment is safe for operation.")
 
 class TelescopeSlewScript(BaseModel):
     """Represents the generated ASCOM/INDI XML slew script."""
@@ -87,3 +92,13 @@ class ObservatoryConfig(BaseModel):
     lat: float = Field(default=33.356, description="Latitude in decimal degrees.")
     lon: float = Field(default=-116.865, description="Longitude in decimal degrees.")
     alt: float = Field(default=1706, description="Altitude in meters.")
+
+# --- Scoring Weights ---
+class ScoringWeights(BaseModel):
+    """Tuning hyperparameters for the composite target prioritization score."""
+    spatial_weight_alpha: float = Field(default=1.0, description="Weight for spatial containment probability.")
+    mass_weight_beta: float = Field(default=0.5, description="Weight for galaxy mass/luminosity.")
+    extinction_gamma: float = Field(default=0.3, description="Weight for atmospheric extinction/airmass.")
+    weather_delta: float = Field(default=0.2, description="Weight for weather quality.")
+    coincidence_boost: float = Field(default=3.0, description="Boost factor for GRB coincidence.")
+    probability_threshold: float = Field(default=0.01, description="Minimum probability threshold for target consideration.")
