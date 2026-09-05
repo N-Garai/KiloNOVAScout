@@ -3,7 +3,6 @@ import asyncio
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from strands.llm import LiteLLMClient
 
 from .agents.agent import KilonovaScoutAgent
 from .models import AgentState, GcnKafkaPayload, AgentOutput, TelescopeSlewScript, ObservatoryConfig
@@ -53,8 +52,8 @@ kilonova_tools = KilonovaScoutTools(
 kilonova_agent = KilonovaScoutAgent(
     agent_name="kilonovascout-core",
     tools=kilonova_tools,
-    llm_model=PRIMARY_LLM,
-    fallback_llm=FALLBACK_LLM
+    model=PRIMARY_LLM,
+    fallback_model=FALLBACK_LLM
 )
 
 event_simulator = EventSimulator()
@@ -104,8 +103,8 @@ async def update_agent_config(config: ObservatoryConfig):
     kilonova_agent = KilonovaScoutAgent(
         agent_name="kilonovascout-core",
         tools=kilonova_tools,
-        llm_model=PRIMARY_LLM,
-        fallback_llm=FALLBACK_LLM
+        model=PRIMARY_LLM,
+        fallback_model=FALLBACK_LLM
     )
     
     print(f"[API] Observatory updated: {OBSERVATORY_NAME} ({OBSERVATORY_LAT}, {OBSERVATORY_LON}, {OBSERVATORY_ALT}m)")

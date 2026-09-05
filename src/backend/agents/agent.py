@@ -18,12 +18,24 @@ class KilonovaScoutAgent(Agent):
     """
 
     def __init__(self, agent_name: str, tools: KilonovaScoutTools, 
-                 llm_model: str = "google/gemini-1.5-flash",
-                 fallback_llm: str = "groq/llama3-70b-8192"):
-        super().__init__(agent_name=agent_name, llm_model=llm_model)
-        self.tools = tools
-        self.primary_llm = llm_model
-        self.fallback_llm = fallback_llm
+                 model: str = "google/gemini-1.5-flash",
+                 fallback_model: str = "groq/llama3-70b-8192"):
+        # Prepare tools list for Strands Agent
+        # Strands expects functions decorated with @tool or imported modules
+        # Here we pass the bound methods from our tools instance
+        strands_tools = [
+            tools.parse_healpix_map,
+            tools.query_glade_catalog,
+            tools.check_observatory_weather,
+            tools.generate_telescope_slew_script,
+            tools.send_sms_alert,
+        ]
+        
+        super().__init__(name=agent_name, model=model, tools=strands_tools)
+        
+        self.tools_instance = tools
+        self.primary_model = model
+        self.fallback_model = fallback_model
         self.agent_state = AgentState(status="initialized", approval_needed=False)
 
         self.system_message = (
@@ -35,36 +47,28 @@ class KilonovaScoutAgent(Agent):
             "Only request human approval once the slew script is ready."
         )
 
-        self.register_tools(
-            Tool(name="parse_healpix_map", func=self.tools.parse_healpix_map),
-            Tool(name="query_glade_catalog", func=self.tools.query_glade_catalog),
-            Tool(name="check_observatory_weather", func=self.tools.check_observatory_weather),
-            Tool(name="generate_telescope_slew_script", func=self.tools.generate_telescope_slew_script),
-            Tool(name="send_sms_alert", func=self.tools.send_sms_alert),
-        )
-
     async def process_gcn_event(self, payload: GcnKafkaPayload) -> AgentOutput:
         """Processes event with automatic LLM fallback if primary fails."""
         try:
             return await self._run_agent_loop(payload)
         except Exception as e:
-            print(f"[CRITICAL] Primary LLM ({self.primary_llm}) failed: {e}")
-            print(f"[RECOVERY] Attempting fallback to {self.fallback_llm}...")
+            print(f"[CRITICAL] Primary Model ({self.primary_model}) failed: {e}")
+            print(f"[RECOVERY] Attempting fallback to {self.fallback_model}...")
             
             # Switch internal model state for fallback attempt
-            self.llm_model = self.fallback_llm
+            self.model = self.fallback_model
             try:
                 result = await self._run_agent_loop(payload)
                 print(f"[RECOVERY] Fallback successful.")
                 return result
             except Exception as fe:
                 self.agent_state.status = "error"
-                error_msg = f"Both primary and fallback LLMs failed. Final error: {fe}"
+                error_msg = f"Both primary and fallback models failed. Final error: {fe}"
                 print(f"[FATAL] {error_msg}")
                 return AgentOutput(message=error_msg, action_status="failure")
             finally:
                 # Reset to primary for next event
-                self.llm_model = self.primary_llm
+                self.model = self.primary_model
 
     async def _run_agent_loop(self, payload: GcnKafkaPayload) -> AgentOutput:
         """The core logic of the agent processing loop."""
