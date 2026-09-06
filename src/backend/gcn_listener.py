@@ -107,6 +107,61 @@ def _parse_voevent_xml(xml_text: bytes) -> Optional[Voevent]:
         return None
 
 
+class SkymapUpdateTracker:
+    """Dynamic re-pointing detector for updated skymaps (v3 PRD M9.2).
+
+    The PRD specifies that when a preliminary sky map is updated (e.g.
+    BAYESTAR -> LALInference) and the 90% region centroid shifts by more
+    than 10 degrees, the full pipeline should re-trigger and a
+    re-authorization request should be sent.
+
+    The orchestrator records the parsed-skymap centroid after each run via
+    :meth:`record` and consults :meth:`evaluate` on UPDATE notices.
+    """
+
+    SHIFT_THRESHOLD_DEG = 10.0
+
+    def __init__(self) -> None:
+        self._centroids: Dict[str, tuple] = {}
+
+    @staticmethod
+    def superevent_id(ivorn: str) -> str:
+        """Reduce an IVORN like 'ivo://gwnet/LVC#GW170817-Update' to 'GW170817'."""
+        base = ivorn.split("#", 1)[-1] if "#" in ivorn else ivorn
+        for suffix in ("-Update", "-Preliminary", "-Initial", "-Retraction", "-RETRACTION"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+        return base
+
+    def record(self, superevent_id: str, ra_deg: float, dec_deg: float) -> None:
+        self._centroids[superevent_id] = (float(ra_deg), float(dec_deg))
+
+    def evaluate(self, superevent_id: str, ra_deg: float, dec_deg: float) -> Dict[str, Any]:
+        """Compare a new centroid with the previous one for this superevent.
+
+        Returns ``{"repoint": bool, "shift_deg": float, "previous": tuple|None}``.
+        """
+        previous = self._centroids.get(superevent_id)
+        self.record(superevent_id, ra_deg, dec_deg)
+        if previous is None:
+            return {"repoint": False, "shift_deg": 0.0, "previous": None}
+        shift = _angular_separation_deg(previous[0], previous[1], ra_deg, dec_deg)
+        return {
+            "repoint": shift > self.SHIFT_THRESHOLD_DEG,
+            "shift_deg": round(shift, 4),
+            "previous": previous,
+        }
+
+
+def _angular_separation_deg(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
+    """Great-circle angular separation between two ICRS positions (degrees)."""
+    from math import radians, cos, sin, sqrt, atan2
+
+    ra1, dec1, ra2, dec2 = map(radians, (ra1, dec1, ra2, dec2))
+    a = sin((dec2 - dec1) / 2) ** 2 + cos(dec1) * cos(dec2) * sin((ra2 - ra1) / 2) ** 2
+    return 2 * atan2(sqrt(a), sqrt(1 - a)) * 180.0 / 3.141592653589793
+
+
 class GcnListener:
     """Background listener for live GCN alerts with mock fallback."""
 

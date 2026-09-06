@@ -62,6 +62,38 @@ class RunRegistry:
         buffer.record.steps.append(step)
         await self._emit(run_id, step)
 
+    async def attach(
+        self,
+        run_id: str,
+        *,
+        provenance: Optional[Dict[str, str]] = None,
+        visualizations: Optional[Dict[str, str]] = None,
+        observation_header: Optional[str] = None,
+        event_update: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Attach v3 run artifacts (provenance, plots, FITS header, skymap stats).
+
+        Called by the orchestrator as artifacts become available; all fields
+        are optional and merge into the existing record.
+        """
+        buffer = self._runs.get(run_id)
+        if not buffer:
+            return
+        if provenance:
+            merged = dict(buffer.record.provenance or {})
+            merged.update(provenance)
+            buffer.record.provenance = merged
+        if visualizations:
+            merged_viz = dict(buffer.record.visualizations or {})
+            merged_viz.update(visualizations)
+            buffer.record.visualizations = merged_viz
+        if observation_header is not None:
+            buffer.record.observation_header = observation_header
+        if event_update:
+            event = dict(buffer.record.event or {})
+            event.update(event_update)
+            buffer.record.event = event
+
     async def finish_run(self, run_id: str, status: str, llm_rationale: Optional[str] = None, candidates: Optional[List[Dict[str, Any]]] = None, error: str = "", weather: Optional[Dict[str, Any]] = None, slew_script: Optional[str] = None) -> None:
         buffer = self._runs.get(run_id)
         if not buffer:
@@ -212,18 +244,31 @@ def build_report_markdown(record: RunRecord, weights: Dict[str, float]) -> str:
 
 
 def _format_score_line(name: str, bd: Dict[str, Any], weights: Dict[str, float]) -> str:
-    # bd may be a plain dict OR a pydantic ScoreBreakdown model
+    """Render one candidate's v3 scoring formula as a single-line trace.
+
+    v3 formula (PRD M10):
+      S = α·P + β·w_Sch − γ·X̄ − δ·C + ε·B_GRB + ζ·SNR − η·L_moon
+    """
     terms = _get_dict_attr(bd, "terms", {})
     w = weights or {}
     total = _get_dict_attr(bd, "total", 0)
     try:
+        alpha = w.get("spatial_weight_alpha", w.get("alpha", 1.0))
+        beta = w.get("mass_weight_beta", w.get("beta", 0.5))
+        gamma = w.get("extinction_gamma", w.get("gamma", 0.3))
+        delta = w.get("weather_delta", w.get("delta", 0.2))
+        epsilon = w.get("coincidence_boost", w.get("epsilon", 3.0))
+        zeta = w.get("snr_weight_zeta", w.get("zeta", 0.15))
+        eta = w.get("lunar_penalty_eta", w.get("eta", 0.1))
         line = (
-            f"S({name}) = {w.get('spatial_prior', 1.0):.2f} × {terms.get('spatial', 0):.3f}"
-            f" + {w.get('galaxy_mass_prior', 0.6):.2f} × {terms.get('mass', 0):.3f}"
-            f" − {w.get('airmass_penalty', 0.2):.2f} × {terms.get('airmass', 0):.3f}"
-            f" − {w.get('cloud_cover_penalty', 0.5):.2f} × {terms.get('cloud', 0):.3f}"
-            f" + {w.get('grb_coincidence_boost', 3.0) if terms.get('grb_boost', 0) else 0:.2f} × {terms.get('grb_boost', 0):.3f}"
-            f" = {float(total):.3f}"
+            f"S({name}) = {alpha:.2f}×{terms.get('spatial', 0):.4f}"
+            f" + {beta:.2f}×{terms.get('schechter', 0):.4f}"
+            f" − {gamma:.2f}×{terms.get('airmass', 0):.3f}"
+            f" − {delta:.2f}×{terms.get('cloud', 0):.3f}"
+            f" + {epsilon:.2f}×{terms.get('grb_boost', 0):.1f}"
+            f" + {zeta:.2f}×{terms.get('snr', 0):.4f}"
+            f" − {eta:.2f}×{terms.get('lunar', 0):.3f}"
+            f" = {float(total):.4f}"
         )
     except Exception:
         line = f"S({name}) = {total}"

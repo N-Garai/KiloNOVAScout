@@ -16,6 +16,16 @@ export default function HeroSection() {
       </div>
 
       <div className="relative z-10 text-center max-w-5xl">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.8, delay: 0.2 }}
+          className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-green-500/30 bg-green-500/10 text-green-400 mb-8"
+        >
+          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          <span className="font-mono text-xs tracking-widest uppercase">SYSTEM ONLINE</span>
+        </motion.div>
+
         <motion.h1
           initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
@@ -40,9 +50,9 @@ export default function HeroSection() {
           transition={{ duration: 0.8, delay: 0.6 }}
           className="font-mono text-sm md:text-base text-gray-400 mb-12 max-w-2xl mx-auto"
         >
-          An event-driven background daemon that listens for NASA Gravitational Wave alerts, 
-          calculates astrometry, checks weather, and autonomously generates telescope slew scripts — 
-          only pinging the human when a target is ready for approval.
+          An event-driven background daemon that processes astrophysical triggers, 
+          calculates optimal observation strategies, and generates telescope slewing sequences — 
+          initiating manual intervention only when a target is validated and ready.
         </motion.p>
 
         <motion.div

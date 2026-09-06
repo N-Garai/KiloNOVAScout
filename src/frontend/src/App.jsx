@@ -56,9 +56,17 @@ function ApprovalModal({ onClose }) {
           <motion.div
             animate={{ scale: [1, 1.1, 1] }}
             transition={{ repeat: Infinity, duration: 2 }}
-            className="text-6xl mb-4"
+            className="relative w-16 h-16 mx-auto mb-4"
           >
-            🎯
+            <svg viewBox="0 0 64 64" className="w-full h-full" fill="none" stroke="currentColor">
+              <circle cx="32" cy="32" r="28" className="text-cosmic-cyan" strokeWidth="2" />
+              <circle cx="32" cy="32" r="18" className="text-cosmic-cyan/70" strokeWidth="2" />
+              <circle cx="32" cy="32" r="8" className="text-cosmic-cyan" strokeWidth="2" />
+              <line x1="32" y1="42" x2="32" y2="58" className="text-cosmic-magenta" strokeWidth="2" />
+              <line x1="32" y1="6" x2="32" y2="22" className="text-cosmic-magenta" strokeWidth="2" />
+              <line x1="6" y1="32" x2="22" y2="32" className="text-cosmic-magenta" strokeWidth="2" />
+              <line x1="42" y1="32" x2="58" y2="32" className="text-cosmic-magenta" strokeWidth="2" />
+            </svg>
           </motion.div>
           <h2 className="font-cosmic text-3xl font-bold text-cosmic-cyan mb-2">
             TARGET ACQUIRED

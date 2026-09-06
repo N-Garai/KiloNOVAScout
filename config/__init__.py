@@ -33,9 +33,16 @@ def load_scoring_weights() -> dict:
 
 
 _DEFAULT_WEIGHTS = {
-    "spatial_prior": 1.0,
-    "galaxy_mass_prior": 0.6,
-    "airmass_penalty": 0.2,
-    "cloud_cover_penalty": 0.5,
-    "grb_coincidence_boost": 3.0
+    "spatial_weight_alpha": 1.0,
+    "mass_weight_beta": 0.5,
+    "extinction_gamma": 0.3,
+    "weather_delta": 0.2,
+    "coincidence_boost": 3.0,
+    "snr_weight_zeta": 0.15,
+    "lunar_penalty_eta": 0.1,
+    "schechter_l_star": 1.0e10,
+    "schechter_alpha": 1.0,
+    "zenith_extinction": 0.12,
+    "peak_kilonova_mag": 17.5,
+    "probability_threshold": 0.01,
 }

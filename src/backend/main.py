@@ -35,6 +35,7 @@ from .models import (
 from .tools import KilonovaScoutTools
 from .simulator.event_simulator import EventSimulator
 from .run_registry import build_report_markdown
+from .agents.writer_agent import build_report_markdown as build_writer_markdown, build_report_html, build_report_latex
 from .gcn_listener import GcnListener
 
 logging.basicConfig(level=logging.INFO)
@@ -69,7 +70,7 @@ FALLBACK_LLM = os.getenv("FALLBACK_LLM", "groq/llama3-70b-8192")
 app = FastAPI(
     title="KilonovaScout Backend API",
     description="Autonomous Multi-Messenger Astronomy Targeting Agent.",
-    version="2.0.0",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -100,6 +101,7 @@ def _galaxy_to_dict(g) -> dict:
     # NOTE: getattr defaults do NOT cover fields that exist but are None,
     # so coalesce explicitly — the frontend calls .toFixed() unconditionally.
     score_breakdown = getattr(g, "score_breakdown", None)
+    observability = getattr(g, "observability", None)
     return {
         "name": g.name,
         "ra": g.ra_deg,
@@ -108,11 +110,15 @@ def _galaxy_to_dict(g) -> dict:
         "probability": g.probability_overlap,
         "composite_score": getattr(g, "composite_score", 0.0) or 0.0,
         "normalized_priority": getattr(g, "normalized_priority", None),
+        "luminosity_k": getattr(g, "luminosity_k", None),
+        "pgc": getattr(g, "pgc", None),
+        "catalog_source": getattr(g, "catalog_source", None) or "unknown",
+        "observability": observability if isinstance(observability, dict) else None,
         "score_breakdown": score_breakdown.model_dump() if hasattr(score_breakdown, "model_dump") else score_breakdown,
     }
 
 
-def _build_simulate_response(agent_output, run_id: str) -> dict:
+async def _build_simulate_response(agent_output, run_id: str) -> dict:
     details = agent_output.details if agent_output.details else {}
     galaxies_raw = kilonova_agent.agent_state.candidate_galaxies or []
     galaxies = [_galaxy_to_dict(g) for g in galaxies_raw]
@@ -143,7 +149,32 @@ def _build_simulate_response(agent_output, run_id: str) -> dict:
         "slew_script": details.get("slew_script", ""),
         "run_id": run_id,
         "llm_rationale": kilonova_agent.agent_state.llm_rationale,
+        # v3 provenance badge (M4.4): skymap/catalog/event data-source attribution
+        "provenance": await _run_provenance(run_id),
+        "visualizations": await _run_visualizations(run_id),
     }
+
+
+async def _run_provenance(run_id: Optional[str]) -> Optional[dict]:
+    """Fetch the provenance dict attached to a run record, if any."""
+    if not run_id:
+        return None
+    try:
+        record = await run_registry.get_record(run_id)
+    except Exception:
+        return None
+    return dict(record.provenance) if record and record.provenance else None
+
+
+async def _run_visualizations(run_id: Optional[str]) -> Optional[dict]:
+    """Fetch the visualization PNGs attached to a run record, if any."""
+    if not run_id:
+        return None
+    try:
+        record = await run_registry.get_record(run_id)
+    except Exception:
+        return None
+    return dict(record.visualizations) if record and record.visualizations else None
 
 
 @app.get("/agent/config")
@@ -218,7 +249,7 @@ async def simulate_gcn_alert():
     agent_output = await kilonova_agent.process_gcn_event(mock_payload)
     global _latest_run_id
     _latest_run_id = kilonova_agent.agent_state.run_id
-    return _build_simulate_response(agent_output, _latest_run_id)
+    return await _build_simulate_response(agent_output, _latest_run_id)
 
 
 @app.post("/api/simulate-event")
@@ -227,7 +258,7 @@ async def api_simulate_event():
     agent_output = await kilonova_agent.run_mock_event()
     global _latest_run_id
     _latest_run_id = kilonova_agent.agent_state.run_id
-    return _build_simulate_response(agent_output, _latest_run_id)
+    return await _build_simulate_response(agent_output, _latest_run_id)
 
 
 @app.post("/api/simulate-gcn-alert")
@@ -261,6 +292,8 @@ async def api_latest_event(response: Response):
         "event": record.event,
         "llm_rationale": record.llm_rationale,
         "candidates": record.candidates,
+        "provenance": dict(record.provenance) if record.provenance else None,
+        "execution_traces": kilonova_agent.get_execution_traces(),
     }
 
 
@@ -279,8 +312,16 @@ async def api_run_events(run_id: str):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.get("/api/report/{run_id}")
-async def api_report(run_id: str):
+@app.get("/api/runs/{run_id}/report")
+async def api_run_report(run_id: str):
+    """Writer-agent report (v3 PRD M6.6).
+
+    Returns the report in dual format: rich HTML (print-to-PDF ready, with
+    embedded visualizations and calculation traces) plus Markdown, LaTeX
+    source, and data provenance. ``pdf_url`` is only populated when a
+    server-side PDF renderer (weasyprint/xelatex) is available — Option C
+    (browser print) is the Render-safe default.
+    """
     record = await run_registry.get_record(run_id)
     if not record:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -289,7 +330,48 @@ async def api_report(run_id: str):
         weights = _loader()
     except Exception:
         weights = {}
-    markdown = build_report_markdown(record, weights)
+
+    def _render():
+        md = build_writer_markdown(record, weights)
+        html_doc = build_report_html(record, weights, visualizations=record.visualizations)
+        latex = build_report_latex(record, weights)
+        return md, html_doc, latex
+
+    try:
+        markdown, html_doc, latex = await asyncio.to_thread(_render)
+    except Exception as exc:
+        logger.warning(f"[API] writer report failed ({exc}); falling back to legacy markdown")
+        markdown = build_report_markdown(record, weights)
+        html_doc, latex = None, None
+
+    return {
+        "run_id": run_id,
+        "format": "dual",
+        "markdown": markdown,
+        "html": html_doc,
+        "latex": latex,
+        "pdf_url": None,  # populated only when weasyprint/xelatex is available
+        "provenance": dict(record.provenance) if record.provenance else None,
+        "visualizations": list((record.visualizations or {}).keys()),
+    }
+
+
+@app.get("/api/report/{run_id}")
+async def api_report(run_id: str):
+    """Legacy Markdown report endpoint (kept for API compatibility)."""
+    record = await run_registry.get_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        from config import load_scoring_weights as _loader
+        weights = _loader()
+    except Exception:
+        weights = {}
+    try:
+        markdown = build_writer_markdown(record, weights)
+    except Exception as exc:
+        logger.warning(f"[API] writer markdown failed ({exc}); using legacy builder")
+        markdown = build_report_markdown(record, weights)
     return {"run_id": run_id, "format": "markdown", "content": markdown}
 
 

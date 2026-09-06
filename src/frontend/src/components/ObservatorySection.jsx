@@ -275,7 +275,13 @@ export default function ObservatorySection() {
             className="glass rounded-2xl p-6 border border-cosmic-magenta/20"
           >
             <h3 className="font-cosmic text-xl font-bold text-white mb-6 flex items-center gap-2">
-              <span className="text-cosmic-cyan">🛰</span> Station Config
+              <span className="text-cosmic-cyan">
+                <svg viewBox="0 0 24 24" className="w-5 h-5 inline-block" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <circle cx="12" cy="12" r="3.2" />
+                  <path d="M12 2v4m0 12v4M2 12h4m12 0h4" />
+                  <circle cx="12" cy="12" r="9" strokeDasharray="3 3" />
+                </svg>
+              </span> Station Config
             </h3>
 
             {/* Observatory Name */}

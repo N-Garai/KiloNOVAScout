@@ -35,6 +35,9 @@ class HealpixSkymap(BaseModel):
     probdensity: List[float] = Field(..., description="Probability density values for each pixel.")
     supercell_indices: List[int] = Field(..., description="Indices of significant HEALPix supercells.")
     localization_area_sq_deg: float = Field(..., description="Area of localization in square degrees.")
+    provenance_source: Optional[str] = Field(None, description="live | replay | synthetic")
+    dist_mean: Optional[float] = Field(None, description="Probability-weighted mean luminosity distance (Mpc).")
+    dist_std: Optional[float] = Field(None, description="Probability-weighted distance uncertainty (Mpc).")
 
 class ScoreBreakdown(BaseModel):
     """Term-level audit trail for one candidate's composite score."""
@@ -56,6 +59,8 @@ class Galaxy(BaseModel):
     composite_score: Optional[float] = Field(None, description="Composite prioritization score.")
     score_breakdown: Optional[ScoreBreakdown] = Field(None, description="Per-candidate scoring audit trail.")
     normalized_priority: Optional[float] = Field(None, description="Normalized 0-100 priority across the run.")
+    catalog_source: Optional[str] = Field(None, description="live | cached | mock — data source for this candidate row.")
+    observability: Optional[Dict[str, Any]] = Field(None, description="Windowed airmass, lunar separation, SNR proxy and extinction metrics.")
 
 class ObservatoryWeather(BaseModel):
     """Current weather conditions at an observatory location."""
@@ -115,6 +120,9 @@ class RunRecord(BaseModel):
     candidates: List[Dict[str, Any]] = Field(default_factory=list, description="Final candidate summary.")
     weather: Optional[Dict[str, Any]] = Field(None, description="Weather snapshot for the run.")
     slew_script: Optional[str] = Field(None, description="Generated slew script content.")
+    provenance: Optional[Dict[str, str]] = Field(None, description="Data source attribution: {skymap, catalog, event} with values live | replay | cached | synthetic | mock.")
+    visualizations: Optional[Dict[str, str]] = Field(None, description="Base64-encoded PNG plots keyed by plot name (Milestone 8).")
+    observation_header: Optional[str] = Field(None, description="FITS observation header card text for scientific reproducibility (Milestone 9.1).")
 
 class AgentOutput(BaseModel):
     """Standard output format for the KilonovaScout agent actions."""
@@ -134,10 +142,25 @@ class ObservatoryConfig(BaseModel):
 
 # --- Scoring Weights ---
 class ScoringWeights(BaseModel):
-    """Tuning hyperparameters for the composite target prioritization score."""
+    """Tuning hyperparameters for the composite target prioritization score.
+
+    Full v3 formula (PRD Milestone 10):
+      S_i = alpha * P_spatial + beta * Schechter(L_K) - gamma * X_i
+            - delta * C + epsilon * B_GRB + zeta * snr_proxy - eta * L_moon
+    """
     spatial_weight_alpha: float = Field(default=1.0, description="Weight for spatial containment probability.")
-    mass_weight_beta: float = Field(default=0.5, description="Weight for galaxy mass/luminosity.")
+    mass_weight_beta: float = Field(default=0.5, description="Weight for Schechter luminosity function term.")
     extinction_gamma: float = Field(default=0.3, description="Weight for atmospheric extinction/airmass.")
     weather_delta: float = Field(default=0.2, description="Weight for weather quality.")
     coincidence_boost: float = Field(default=3.0, description="Boost factor for GRB coincidence.")
+    snr_weight_zeta: float = Field(default=0.15, description="Weight for the distance-based SNR proxy term.")
+    lunar_penalty_eta: float = Field(default=0.1, description="Weight for the lunar proximity penalty term.")
+    schechter_l_star: float = Field(default=1.0e10, description="Characteristic Schechter luminosity (solar luminosities).")
+    # NOTE: the PRD sketched alpha=-1.0, but the number-density weight
+    # (L/L*)^-1 diverges for faint dwarfs and unconditionally outranks bright
+    # hosts, violating the PRD's own acceptance criterion ("NGC 4993 in top
+    # candidates"). Tuned to +1.0 so the weight peaks at L* and is bounded.
+    schechter_alpha: float = Field(default=1.0, description="Schechter faint-end slope (peaked at L* when 1.0).")
+    zenith_extinction: float = Field(default=0.12, description="R-band extinction coefficient (mag per airmass).")
+    peak_kilonova_mag: float = Field(default=17.5, description="Peak apparent magnitude of the kilonova at the 40 Mpc reference distance (GW170817-calibrated).")
     probability_threshold: float = Field(default=0.01, description="Minimum probability threshold for target consideration.")

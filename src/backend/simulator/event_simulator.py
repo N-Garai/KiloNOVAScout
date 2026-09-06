@@ -7,14 +7,33 @@ from ..models import GcnKafkaPayload, Voevent
 
 class EventSimulator:
     """Simulates NASA GCN Kafka payloads for reproducible demo and testing.
+
+    When the bundled replay packet (``data/GW170817_initial.json``, v3 PRD
+    M4.1) is present it is loaded verbatim — a faithful VOEvent replay with the
+    real IVORN and trigger time.  Otherwise an equivalent packet is built
+    inline so the demo never breaks.
     
     Uses the famous GW170817 neutron star merger as the template event,
-    allowing the hackathon judges to see a 100% reproducible 5-minute demo.
+    allowing a 100% reproducible demo without waiting for real detections.
     """
 
     def __init__(self):
-        self.mock_payload = self._create_gw170817_payload()
+        self.mock_payload = self._load_replay_packet() or self._create_gw170817_payload()
 
+    def _load_replay_packet(self):
+        """Load the bundled GW170817_initial.json replay packet, if present."""
+        try:
+            import os
+            here = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.join(here, "..", "data", "GW170817_initial.json")
+            if not os.path.exists(path):
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            return GcnKafkaPayload(**raw)
+        except Exception as exc:
+            print(f"[SYS] replay packet load failed ({exc}); using inline mock")
+            return None
     def _create_gw170817_payload(self) -> GcnKafkaPayload:
         """Creates a mock GW170817 payload based on historical data."""
         return GcnKafkaPayload(

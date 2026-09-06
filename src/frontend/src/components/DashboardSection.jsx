@@ -11,6 +11,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const [llmRationale, setLlmRationale] = useState('')
   const [runId, setRunId] = useState('')
   const [reportMarkdown, setReportMarkdown] = useState('')
+  const [reportHtml, setReportHtml] = useState('')
+  const [provenance, setProvenance] = useState(null)
   const [showReport, setShowReport] = useState(false)
   const [expandedTrace, setExpandedTrace] = useState(null)
   const esRef = useRef(null)
@@ -45,6 +47,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       setAgentStatus(data.status)
       setSource(data.alert?.source || 'mock')
       setLlmRationale(data.llm_rationale || '')
+      setProvenance(data.provenance || null) // v3 data-source attribution badge (M4.4)
+      setReportMarkdown('')
+      setReportHtml('')
 
       // Seed with the measured traces from the response (they may arrive before SSE connects)
       if (Array.isArray(data.execution_traces) && data.execution_traces.length > 0) {
@@ -116,30 +121,67 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const openReport = async () => {
     if (!runId) return
     try {
-      const { data } = await axios.get(`/api/report/${runId}`)
-      setReportMarkdown(data.content)
+      const { data } = await axios.get(`/api/runs/${runId}/report`)
+      setReportMarkdown(data.markdown || data.content || '')
+      setReportHtml(data.html || '')
       setShowReport(true)
     } catch (e) {
       console.error('report fetch failed', e)
     }
   }
 
-  const printReport = () => {
+  const printReport = async () => {
+    // v3 PRD M6.5 Option C: print the rich HTML report (embeds visualizations
+    // and calculation traces + a print-optimized stylesheet).
+    if (!runId) return
+    let htmlDoc = reportHtml
+    let mdDoc = reportMarkdown
+    if (!htmlDoc && !mdDoc) {
+      try {
+        const { data } = await axios.get(`/api/runs/${runId}/report`)
+        htmlDoc = data.html || ''
+        mdDoc = data.markdown || data.content || ''
+        setReportHtml(htmlDoc)
+        setReportMarkdown(mdDoc)
+      } catch (e) {
+        console.error('report fetch failed', e)
+        return
+      }
+    }
     const win = window.open('', '_blank')
-    if (!win || !reportMarkdown) return
-    const pre = win.document.createElement('pre')
-    pre.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
-    pre.style.fontSize = '13px'
-    pre.style.padding = '24px'
-    pre.style.whiteSpace = 'pre-wrap'
-    pre.textContent = reportMarkdown
-    win.document.body.appendChild(pre)
-    win.document.close()
-    win.print()
+    if (!win) return
+    if (htmlDoc) {
+      win.document.write(htmlDoc)
+      win.document.close()
+      win.focus()
+      win.print()
+    } else if (mdDoc) {
+      const pre = win.document.createElement('pre')
+      pre.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+      pre.style.fontSize = '13px'
+      pre.style.padding = '24px'
+      pre.style.whiteSpace = 'pre-wrap'
+      pre.textContent = mdDoc
+      win.document.body.appendChild(pre)
+      win.document.close()
+      win.print()
+    }
   }
 
-  // Simple inline markdown-ish renderer for the report body (headings, tables stay pre-like)
+  // Rich HTML report (embedded visualizations, calculation traces, print CSS) —
+  // PRD M6.6. Falls back to the inline markdown renderer only if no HTML body
+  // came back from the server.
   const renderReportBody = () => {
+    if (reportHtml) {
+      return (
+        <iframe
+          title="KilonovaScout Observation Report"
+          srcDoc={reportHtml}
+          className="w-full h-full min-h-[60vh] bg-white rounded-lg border border-white/10"
+          sandbox="allow-same-origin"
+        />
+      )
+    }
     if (!reportMarkdown) return null
     return reportMarkdown
       .split('\n')
@@ -331,6 +373,25 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                 <span className="text-white">{alertData.observatory}</span>
               </div>
             </div>
+            {provenance && (
+              <div className="mt-4 pt-3 border-t border-white/10 flex flex-wrap gap-2">
+                <span className="text-gray-500 font-mono text-[10px] uppercase tracking-wider self-center">Data provenance:</span>
+                {Object.entries(provenance).map(([key, value]) => (
+                  <span
+                    key={key}
+                    className={`font-mono text-[10px] px-2 py-0.5 rounded-full border ${
+                      value === 'live'
+                        ? 'text-green-400 border-green-500/40 bg-green-500/10'
+                        : value === 'replay' || value === 'cached'
+                        ? 'text-amber-400 border-amber-500/40 bg-amber-500/10'
+                        : 'text-gray-400 border-white/15 bg-white/5'
+                    }`}
+                  >
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+            )}
           </motion.div>
         )}
 
@@ -384,11 +445,23 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                   {candidate.score_breakdown && (
                     <div className="mt-2 font-mono text-[11px] text-gray-500">
                       {(() => {
+                        // v3 full formula (PRD M10):
+                        // S = α·P + β·w_Sch − γ·X̄ − δ·C + ε·B + ζ·SNR − η·L_moon
                         const t = candidate.score_breakdown.terms || {}
                         const w = candidate.score_breakdown.weights || {}
-                        const fmt = (v) => Number(v).toFixed(2)
+                        const fmt = (v) => Number(v || 0).toFixed(2)
                         const f = (v) => Number(v).toFixed(3)
-                        return `S = ${fmt(w.spatial_prior)}×${fmt(t.spatial)} + ${fmt(w.galaxy_mass_prior)}×${fmt(t.mass)} − ${fmt(w.airmass_penalty)}×${fmt(t.airmass)} − ${fmt(w.cloud_cover_penalty)}×${fmt(t.cloud)} = ${f(candidate.composite_score)}`
+                        const alpha = w.alpha
+                        const beta = w.beta
+                        const gamma = w.gamma
+                        const delta = w.delta
+                        const zeta = w.zeta
+                        const eta = w.eta
+                        const hasSg = (t.schechter != null) || (t.lunar != null) || (t.snr != null)
+                        if (hasSg) {
+                          return `S = ${fmt(alpha)}×${fmt(t.spatial)} + ${fmt(beta)}×${fmt(t.schechter)} − ${fmt(gamma)}×${fmt(t.airmass)} − ${fmt(delta)}×${fmt(t.cloud)} + ${fmt(t.grb_boost ?? 0)} + ${fmt(zeta)}×${fmt(t.snr)} − ${fmt(eta)}×${fmt(t.lunar)} = ${f(candidate.composite_score)}`
+                        }
+                        return `S = ${fmt(alpha)}×${fmt(t.spatial)} + ${fmt(beta)}×${fmt(t.schechter ?? t.mass)} − ${fmt(gamma)}×${fmt(t.airmass)} − ${fmt(delta)}×${fmt(t.cloud)} = ${f(candidate.composite_score)}`
                       })()}
                     </div>
                   )}
@@ -414,7 +487,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
               animate={{ scale: 1, y: 0 }}
               exit={{ scale: 0.92, y: 20 }}
               onClick={e => e.stopPropagation()}
-              className="glass rounded-xl border border-cosmic-cyan/30 w-full max-w-3xl max-h-[85vh] flex flex-col"
+              className="glass rounded-xl border border-cosmic-cyan/30 w-full max-w-5xl max-h-[85vh] flex flex-col"
             >
               <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
                 <div className="font-cosmic text-sm text-cosmic-cyan">OBSERVATION REPORT</div>

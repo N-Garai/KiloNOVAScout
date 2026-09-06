@@ -43,13 +43,46 @@ from ..run_registry import RunRegistry, normalize_priorities
 from ..tools import KilonovaScoutTools
 from ..simulator.event_simulator import EventSimulator
 from ..llm_reasoner import reason_about_event
-from ..agents import ephemeris_agent, validator_agent
+from ..agents import validator_agent
+from ..agents.visualization_agent import generate_run_visualizations
+from ..gcn_listener import SkymapUpdateTracker
 
 run_registry = RunRegistry()
 
 
 def _now_iso() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
+
+
+class _ToolAuditHook:
+    """Strands lifecycle hook for tool-call audit logging (v3 PRD M9.4).
+
+    Mirrors the PRD's ``AfterToolCallEvent`` pattern: every tool invocation
+    executed through the strands Agent produces an ``[AUDIT]`` line with the
+    tool name and a result preview, complementing the manual measured-step
+    ledger.
+    """
+
+    def register_hooks(self, registry, **kwargs) -> None:  # HookProvider protocol
+        try:
+            from strands.hooks import AfterToolCallEvent
+
+            registry.add_callback(AfterToolCallEvent, self._after_tool_call)
+        except Exception as e:  # hook wiring must never break boot
+            print(f"[AUDIT] hook registration skipped: {e}")
+
+    def _after_tool_call(self, event) -> None:
+        try:
+            tool_use = getattr(event, "tool_use", None)
+            if isinstance(tool_use, dict):
+                tool_name = tool_use.get("name")
+            else:
+                tool_name = getattr(tool_use, "name", None)
+            result = getattr(event, "result", None)
+            result_preview = (str(getattr(result, "text", result))[:120] if result is not None else "")
+            print(f"[AUDIT] {tool_name or 'tool'} completed: {result_preview}")
+        except Exception:
+            pass
 
 
 def _primary_model() -> str:
@@ -90,6 +123,7 @@ def _galaxy_to_dict(g: Galaxy) -> Dict[str, Any]:
     # NOTE: getattr defaults do NOT cover fields that exist but are None,
     # so coalesce explicitly — consumers call .toFixed() unconditionally.
     score_breakdown = getattr(g, "score_breakdown", None)
+    observability = getattr(g, "observability", None)
     return {
         "name": g.name,
         "ra": g.ra_deg,
@@ -98,6 +132,10 @@ def _galaxy_to_dict(g: Galaxy) -> Dict[str, Any]:
         "probability": g.probability_overlap,
         "composite_score": getattr(g, "composite_score", 0.0) or 0.0,
         "normalized_priority": getattr(g, "normalized_priority", None),
+        "luminosity_k": getattr(g, "luminosity_k", None),
+        "pgc": getattr(g, "pgc", None),
+        "catalog_source": getattr(g, "catalog_source", None) or "unknown",
+        "observability": observability if isinstance(observability, dict) else None,
         "score_breakdown": score_breakdown.model_dump() if hasattr(score_breakdown, "model_dump") else score_breakdown,
     }
 
@@ -134,7 +172,9 @@ class KilonovaScoutAgent(Agent):
             tools.parse_healpix_map,
             tools.query_glade_catalog,
             tools.check_observatory_weather,
+            tools.check_dome_safety,
             tools.generate_telescope_slew_script,
+            tools.write_observation_header,
             tools.send_sms_alert,
         ] if tools else []
 
@@ -142,17 +182,20 @@ class KilonovaScoutAgent(Agent):
             name=agent_name,
             model=_build_model(_primary_model()),
             tools=strands_tools,
+            hooks=[_ToolAuditHook()],  # M9.4 lifecycle observability
             system_prompt=(
                 "You are KilonovaScout, a Staff-level Space Systems AI orchestrator. "
                 "Run the astronomy pipeline: ingest -> skymap -> (catalog || weather) -> "
-                "grb_check -> slew_script -> rationale. Only request human approval once "
-                "the slew script is ready. If no NASA GCN event is available, fall back to "
-                "the mock GW170817 payload and continue."
+                "grb_check -> slew_script -> dome_safety -> rationale. Only request human "
+                "approval once the slew script is ready and dome safety is confirmed. "
+                "If no NASA GCN event is available, fall back to the mock GW170817 payload "
+                "and continue."
             ),
         )
 
         self.tools_instance = tools or KilonovaScoutTools()
         self.simulator = EventSimulator()
+        self.update_tracker = SkymapUpdateTracker()  # M9.2 dynamic re-pointing
         self.agent_state = AgentState(
             status="listening",
             approval_needed=False,
@@ -253,7 +296,7 @@ class KilonovaScoutAgent(Agent):
             self.agent_state.status = "rejected"
             return AgentOutput(message=verdict.get("reason", "Rejected by ingestion filter"), action_status="failure")
 
-        # Step 2 — skymap (HEALPix)
+        # Step 2 — skymap (HEALPix) with the v3 fallback chain
         await stamp(2, "healpix.parse_skymap", "running", input_s=skymap_url)
         start = time.perf_counter()
         skymap = await self._try_step("healpix", self.tools_instance.parse_healpix_map, run=run, step=3,
@@ -262,17 +305,51 @@ class KilonovaScoutAgent(Agent):
                     duration_ms=int((time.perf_counter() - start) * 1000))
         self.agent_state.current_skymap = skymap
 
+        # Provenance (M4.4/4.5.5): record which skymap tier won
+        provenance_skymap = getattr(skymap, "provenance_source", None) or "unknown"
+        await run_registry.attach(run.run_id, provenance={"skymap": provenance_skymap})
+
+        # Skymap statistics for the report writer (calculation trace inputs)
+        skymap_stats = {
+            "nside": getattr(skymap, "nside", None),
+            "pixel_count_90": len(getattr(skymap, "supercell_indices", []) or []),
+            "area_sq_deg": getattr(skymap, "localization_area_sq_deg", None),
+            "dist_mean": getattr(skymap, "dist_mean", None),
+            "dist_std": getattr(skymap, "dist_std", None),
+        }
+        await run_registry.attach(run.run_id, event_update={"skymap_summary": skymap_stats})
+
+        # Dynamic re-pointing (M9.2): compare with the previous centroid for
+        # this superevent; on a >10 deg shift, emit a re-authorization alert.
+        repoint_info = None
+        try:
+            if getattr(skymap, "supercell_indices", None):
+                ra_c, dec_c, _ = self.tools_instance._skymap_geometry(skymap)
+                superevent = SkymapUpdateTracker.superevent_id(payload.voevent.ivorn)
+                is_update = "update" in (payload.voevent.ivorn or "").lower()
+                repoint_info = self.update_tracker.evaluate(superevent, ra_c, dec_c)
+                if is_update and repoint_info.get("repoint"):
+                    shift = repoint_info.get("shift_deg", 0.0)
+                    msg = (f"RE-POINTING REQUIRED: skymap centroid shifted {shift:.1f} deg "
+                           f"> 10 deg for {superevent}. Re-authorization requested.")
+                    await stamp(2, "repointing.reauthorized", "completed", output_s=msg)
+                    await self._try_step("notify", self.tools_instance.send_sms_alert, run=run, step=2,
+                                         message=msg, retries=1)
+        except Exception as exc:
+            print(f"[SYS] re-pointing check skipped: {exc}")
+
         # Build skymap summary for the LLM + report
         skymap_summary = {
             "url": skymap_url,
             "nside": getattr(skymap, "nside", None),
             "pixel_count_90": len(getattr(skymap, "supercell_indices", []) or []),
             "area_sq_deg": getattr(skymap, "localization_area_sq_deg", None),
+            "provenance": provenance_skymap,
         }
 
         # Steps 3+4 — concurrent catalog + weather (Milestone 3 DAG)
         async def do_catalog():
-            await stamp(3, "galaxy.query_catalog", "running", input_s="mock GLADE+ crossmatch")
+            await stamp(3, "galaxy.query_catalog", "running", input_s="GLADE+ crossmatch")
             s = time.perf_counter()
             g = await self._try_step("galaxy", self.tools_instance.query_glade_catalog, run=run, step=5,
                                      skymap=skymap, retries=2)
@@ -309,20 +386,33 @@ class KilonovaScoutAgent(Agent):
         galaxies_task = asyncio.ensure_future(do_catalog())
         weather_task = asyncio.ensure_future(do_weather())
         galaxies, weather = await asyncio.gather(galaxies_task, weather_task)
+        self.agent_state.observatory_weather = weather
 
-        # Step 5 — ephemeris / observability (real tool)
+        # Provenance (M4.4/4.5.5): record which catalog tier produced the rows
+        catalog_source = getattr(galaxies[0], "catalog_source", None) if galaxies else None
+        await run_registry.attach(run.run_id, provenance={
+            "catalog": catalog_source or "mock",
+            "event": run.source,
+        })
+
+        # Step 5 — ephemeris / observability. The full per-candidate windowed
+        # airmass (M7.5), lunar separation (M7.3) and SNR proxy (M7.6) metrics
+        # were computed inside the scoring tool; this stage aggregates them,
+        # filters moon-unsafe targets, and stamps the summary.
         await stamp(5, "ephemeris.observability", "running", input_s=f"{len(galaxies)} targets")
         start = time.perf_counter()
         try:
-            target_json = json.dumps([{"ra": g.ra_deg, "dec": g.dec_deg, "name": g.name} for g in galaxies])
-            ephem = await asyncio.to_thread(
-                ephemeris_agent.calculate_target_observability,
-                target_json,
-                self.tools_instance.observatory_location.lat.value,
-                self.tools_instance.observatory_location.lon.value,
-                float(getattr(self.tools_instance.observatory_location, "height", 1706).value),
-            )
-            await stamp(5, "ephemeris.observability", "completed", output_s=f"{len(ephem) if isinstance(ephem, list) else '?'} observable",
+            moon_blocked = 0
+            visible_count = 0
+            for g in galaxies:
+                obs = getattr(g, "observability", None) or {}
+                if obs.get("moon_safe") is False:
+                    moon_blocked += 1
+                if float(obs.get("mean_airmass", 38.0) or 38.0) < 38.0:
+                    visible_count += 1
+            eph_summary = (f"{len(galaxies)} targets; {visible_count} above horizon; "
+                           f"{moon_blocked} excluded by lunar separation")
+            await stamp(5, "ephemeris.observability", "completed", output_s=eph_summary,
                         duration_ms=int((time.perf_counter() - start) * 1000))
         except Exception as exc:
             await stamp(5, "ephemeris.observability", "failed", err=str(exc),
@@ -379,13 +469,68 @@ class KilonovaScoutAgent(Agent):
                     duration_ms=int((time.perf_counter() - start) * 1000))
         self.agent_state.slew_script = slew_script
 
-        # Step 8 — LLM rationale (Milestone 1, real LLM call with failover)
-        await stamp(8, "llm.rationale", "running", input_s="trigger + candidates + weather")
+        # Step 8 — dome safety re-check (v3 PRD M9.5): fresh weather check
+        # between slew-script generation and human approval, with emergency
+        # abort thresholds (humidity > 85% or cloud cover > 40%).
+        await stamp(8, "dome.safety_check", "running", input_s="mid-sequence re-check")
         start = time.perf_counter()
-        decision, rationale = await self._llm_decision(verdict, galaxies, weather, skymap_summary, grb_boost)
-        await stamp(8, "llm.rationale", "completed", output_s=decision,
+        try:
+            dome = await self._try_step("dome", self.tools_instance.check_dome_safety, run=run, step=8, retries=1)
+            weather = dome
+            self.agent_state.observatory_weather = weather
+            await stamp(8, "dome.safety_check", "completed",
+                        output_s=f"dome_safe={getattr(dome, 'dome_safe', True)} "
+                                 f"humidity={getattr(dome, 'humidity_pct', 0):.0f}% "
+                                 f"cloud={getattr(dome, 'cloud_cover_percent', 0):.0f}%",
+                        duration_ms=int((time.perf_counter() - start) * 1000))
+        except Exception as exc:
+            await stamp(8, "dome.safety_check", "failed", err=str(exc),
+                        duration_ms=int((time.perf_counter() - start) * 1000))
+
+        # Step 9 — LLM rationale and visualization agent run concurrently
+        # (PRD M8.4: plots generated in parallel with the rationale).
+        await stamp(9, "llm.rationale", "running", input_s="trigger + candidates + weather")
+
+        async def do_visualizations():
+            try:
+                return await asyncio.to_thread(
+                    generate_run_visualizations,
+                    skymap,
+                    [_galaxy_to_dict(g) for g in galaxies],
+                    _weather_to_dict(weather),
+                )
+            except Exception as exc:
+                print(f"[VIZ] visualization generation failed (continuing): {exc}")
+                return {}
+
+        rationale_task = self._llm_decision(verdict, galaxies, weather, skymap_summary, grb_boost)
+        viz_task = asyncio.ensure_future(do_visualizations())
+        decision, rationale = await rationale_task
+        visualizations = await viz_task
+
+        if visualizations:
+            await run_registry.attach(run.run_id, visualizations=visualizations)
+        await stamp(9, "llm.rationale", "completed", output_s=decision,
                     duration_ms=int((time.perf_counter() - start) * 1000))
         self.agent_state.llm_rationale = rationale
+
+        # Step 10 — FITS observation header (v3 PRD M9.1)
+        await stamp(10, "fits.observation_header", "running", input_s="header packaging")
+        start = time.perf_counter()
+        try:
+            header_info = await asyncio.to_thread(
+                self.tools_instance.write_observation_header,
+                galaxies,
+                weather,
+                slew_script.script_content if slew_script else "",
+            )
+            await run_registry.attach(run.run_id, observation_header=header_info.get("header_text"))
+            await stamp(10, "fits.observation_header", "completed",
+                        output_s=f"{len((header_info.get('header_text') or '').splitlines())} cards",
+                        duration_ms=int((time.perf_counter() - start) * 1000))
+        except Exception as exc:
+            await stamp(10, "fits.observation_header", "failed", err=str(exc),
+                        duration_ms=int((time.perf_counter() - start) * 1000))
 
         # Notify + approval gate
         blocked = weather.cloud_cover_percent > 80 or not getattr(weather, "dome_safe", False)
@@ -394,10 +539,10 @@ class KilonovaScoutAgent(Agent):
                 f"Target Acquired but Sky Overcast ({weather.cloud_cover_percent}%) at {weather.observatory_name}. Monitoring..."
             )
             self.agent_state.status = "weather_blocked" if not decision == "REJECT" else "rejected"
-            await self._try_step("notify", self.tools_instance.send_sms_alert, run=run, step=9, message=msg, retries=1)
+            await self._try_step("notify", self.tools_instance.send_sms_alert, run=run, step=11, message=msg, retries=1)
             return AgentOutput(message=msg, details={"observatory": weather.observatory_name}, action_status="pending")
 
-        await self._try_step("notify", self.tools_instance.send_sms_alert, run=run, step=9,
+        await self._try_step("notify", self.tools_instance.send_sms_alert, run=run, step=11,
                              message=f"TARGET ACQUIRED: Human Approval Required for {len(galaxies)} targets at {weather.observatory_name}.",
                              retries=1)
         self.agent_state.approval_needed = True
