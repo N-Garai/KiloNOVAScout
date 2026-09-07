@@ -6,24 +6,58 @@ export default function MissionSection() {
   const ref = useRef(null)
   const isInView = useInView(ref, { once: true, margin: "-100px" })
 
+  // Inline SVG glyphs (no emoji) — stroke icons matching the site palette.
+  const GLYPHS = {
+    burst: (
+      <svg viewBox="0 0 48 48" className="w-12 h-12" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="24" cy="24" r="5" className="text-cosmic-cyan" fill="currentColor" stroke="none" opacity="0.9" />
+        <path d="M24 4v8M24 36v8M4 24h8M36 24h8M10 10l5.5 5.5M32.5 32.5L38 38M38 10l-5.5 5.5M15.5 32.5L10 38" className="text-cosmic-magenta" strokeLinecap="round" />
+        <circle cx="24" cy="24" r="12" className="text-cosmic-cyan" strokeDasharray="4 4" opacity="0.7" />
+      </svg>
+    ),
+    clock: (
+      <svg viewBox="0 0 48 48" className="w-12 h-12" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="24" cy="26" r="16" className="text-cosmic-cyan" />
+        <path d="M24 18v8l6 4" className="text-cosmic-magenta" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M18 4h12M24 4v6" className="text-cosmic-cyan" strokeLinecap="round" />
+      </svg>
+    ),
+    bottleneck: (
+      <svg viewBox="0 0 48 48" className="w-12 h-12" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M8 12h32M8 24h32M8 36h32" className="text-cosmic-cyan" strokeLinecap="round" />
+        <circle cx="18" cy="12" r="3.5" className="text-cosmic-magenta" fill="currentColor" stroke="none" opacity="0.85" />
+        <circle cx="30" cy="24" r="3.5" className="text-cosmic-magenta" fill="currentColor" stroke="none" opacity="0.85" />
+        <circle cx="14" cy="36" r="3.5" className="text-cosmic-magenta" fill="currentColor" stroke="none" opacity="0.85" />
+      </svg>
+    ),
+    comet: (
+      <svg viewBox="0 0 48 48" className="w-12 h-12" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="32" cy="16" r="6" className="text-cosmic-cyan" fill="currentColor" stroke="none" opacity="0.9" />
+        <path d="M27 21L10 34M29 26l-9 12M24 24l-4 10" className="text-cosmic-magenta" strokeLinecap="round" />
+        <circle cx="38" cy="34" r="1.6" className="text-cosmic-cyan" fill="currentColor" stroke="none" />
+        <circle cx="14" cy="10" r="1.6" className="text-cosmic-cyan" fill="currentColor" stroke="none" />
+      </svg>
+    ),
+  }
+
   const problems = [
     {
-      icon: "🌌",
+      icon: GLYPHS.burst,
       title: "The Race Against Time",
       description: "When LIGO/Virgo detects a gravitational wave, NASA blasts a GCN alert with a HEALPix skymap — a massive, imprecise blob where the merger occurred."
     },
     {
-      icon: "⏱️",
+      icon: GLYPHS.clock,
       title: "Minutes to Hours",
       description: "Optical telescopes have a tiny window to find the resulting kilonova explosion before it fades. Every second counts."
     },
     {
-      icon: "🧮",
+      icon: GLYPHS.bottleneck,
       title: "Manual Bottleneck",
       description: "Astronomers must manually download maps, cross-reference millions of galaxies, check weather, calculate visibility, and write pointing scripts."
     },
     {
-      icon: "💨",
+      icon: GLYPHS.comet,
       title: "The Flash is Gone",
       description: "By the time humans finish the math, the transient optical flash may already be gone. The moment is lost forever."
     }
@@ -59,7 +93,7 @@ export default function MissionSection() {
               transition={{ duration: 0.8, delay: index * 0.2 }}
               className="glass rounded-xl p-8 border border-white/10 hover:border-cosmic-cyan/50 transition-colors"
             >
-              <div className="text-5xl mb-4">{problem.icon}</div>
+              <div className="mb-4">{problem.icon}</div>
               <h3 className="font-cosmic text-2xl font-bold text-cosmic-cyan mb-3">
                 {problem.title}
               </h3>

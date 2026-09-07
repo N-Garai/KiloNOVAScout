@@ -32,6 +32,7 @@ export default function ObservatorySection() {
   const [obsAlt, setObsAlt] = useState(DEFAULT_OBS.alt.toString())
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [saveError, setSaveError] = useState('')
   const [mapZoom, setMapZoom] = useState(1)
   const ref = useRef(null)
   const mapWrapRef = useRef(null)
@@ -107,6 +108,7 @@ export default function ObservatorySection() {
 
   const handleSave = async () => {
     setLoading(true)
+    setSaveError('')
     try {
       const payload = {
         name: obsName || 'Palomar Observatory',
@@ -114,7 +116,8 @@ export default function ObservatorySection() {
         lon: pickedPos.lon,
         alt: parseFloat(obsAlt) || 1706,
       }
-      const res = await axios.put('/agent/config', payload)
+      // 60s timeout: first request after idle may hit a Render cold start.
+      const res = await axios.put('/agent/config', payload, { timeout: 60000 })
       setConfig(res.data)
       setObsName(res.data.name)
       setPickedPos({ lat: res.data.lat, lon: res.data.lon })
@@ -122,6 +125,11 @@ export default function ObservatorySection() {
       setTimeout(() => setSaved(false), 3000)
     } catch (err) {
       console.error('Failed to update observatory:', err)
+      if (err?.request && !err?.response) {
+        setSaveError('Backend unreachable — it may be waking from sleep. Wait ~60s and retry.')
+      } else {
+        setSaveError(`Save failed (HTTP ${err?.response?.status || 'unknown'}). Retry.`)
+      }
     }
     setLoading(false)
   }
@@ -371,6 +379,12 @@ export default function ObservatorySection() {
                 {saved ? 'Configuration saved — ready for GCN alerts' : 'Modified — not yet saved'}
               </span>
             </div>
+
+            {saveError && (
+              <div className="mb-4 rounded-lg border border-red-400/40 bg-red-500/10 px-4 py-2.5 font-mono text-xs text-red-300">
+                {saveError}
+              </div>
+            )}
 
             {/* Save button */}
             <motion.button

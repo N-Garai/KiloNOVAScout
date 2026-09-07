@@ -6,6 +6,7 @@ Render-compatible FastAPI service exposing:
 - /agent/state
 - /agent/status
 - /api/latest-event
+- /api/ping
 - /api/runs/{run_id}/events
 - /api/report/{run_id}
 - /health
@@ -216,6 +217,15 @@ async def update_agent_config(config: ObservatoryConfig):
         tools=kilonova_tools,
     )
 
+    # The startup GCN listener captured the previous agent instance's bound
+    # handler — rebind it so live notices reach the reconfigured agent.
+    try:
+        listener = getattr(app.state, "gcn_listener", None)
+        if listener is not None:
+            listener.on_notice = kilonova_agent.handle_live_notice
+    except Exception as exc:
+        logger.warning(f"[API] GCN listener rebind skipped ({exc})")
+
     logger.info(f"[API] Observatory updated: {OBSERVATORY_NAME} ({OBSERVATORY_LAT}, {OBSERVATORY_LON}, {OBSERVATORY_ALT}m)")
     return ObservatoryConfig(
         name=OBSERVATORY_NAME,
@@ -373,6 +383,23 @@ async def api_report(run_id: str):
         logger.warning(f"[API] writer markdown failed ({exc}); using legacy builder")
         markdown = build_report_markdown(record, weights)
     return {"run_id": run_id, "format": "markdown", "content": markdown}
+
+
+@app.get("/api/ping")
+async def api_ping():
+    """Cheap keep-alive / warm-up probe (Render spin-down avoidance).
+
+    Per version-docs/QnA.md ("Cold-Start Problem") the service is
+    event-driven with a playback harness — not a 24/7 listener. An open
+    demo tab pings this endpoint every few minutes (visible tabs only) so
+    the instance stays warm during active viewing. Does zero pipeline work.
+    """
+    import datetime
+    return {
+        "status": "ok",
+        "observatory": OBSERVATORY_NAME,
+        "time": datetime.datetime.utcnow().isoformat() + "Z",
+    }
 
 
 @app.get("/health")

@@ -15,13 +15,17 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const [provenance, setProvenance] = useState(null)
   const [showReport, setShowReport] = useState(false)
   const [expandedTrace, setExpandedTrace] = useState(null)
+  const [runError, setRunError] = useState('')
+  const [wakingBackend, setWakingBackend] = useState(false)
   const esRef = useRef(null)
   const tracesEndRef = useRef(null)
+  const wakeTimerRef = useRef(null)
 
-  // Close EventSource on unmount
+  // Close EventSource + timers on unmount
   useEffect(() => {
     return () => {
       if (esRef.current) esRef.current.close()
+      if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
     }
   }, [])
 
@@ -34,13 +38,22 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
 
   const simulateEvent = async () => {
     setLoading(true)
+    setRunError('')
+    setWakingBackend(false)
     setExecutionTraces([])
     setCandidates([])
     setAlertData(null)
     setReportMarkdown('')
 
+    // Render free-tier cold starts can take ~60s. If the backend has not
+    // answered after 10s, tell the user it is waking up instead of
+    // appearing to do nothing.
+    wakeTimerRef.current = setTimeout(() => setWakingBackend(true), 10000)
+
     try {
-      const response = await axios.post('/api/simulate-event')
+      // 3-minute timeout: full pipeline (skymap + TAP + LLM + plots) is slow
+      // on a cold free-tier instance.
+      const response = await axios.post('/api/simulate-event', null, { timeout: 180000 })
       const data = response.data
       setAlertData(data.alert)
       setCandidates(data.candidates || [])
@@ -66,7 +79,19 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       }
     } catch (error) {
       console.error('Simulation failed:', error)
+      const status = error?.response?.status
+      if (error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')) {
+        setRunError('Request timed out — the free-tier backend may still be waking up or the pipeline exceeded 3 minutes. Wait a minute and try again.')
+      } else if (error?.request && !error?.response) {
+        setRunError('Could not reach the backend. If it just woke from sleep, wait ~60 seconds and launch again.')
+      } else if (status) {
+        setRunError(`Backend returned HTTP ${status}. Check the service logs and try again.`)
+      } else {
+        setRunError(`Launch failed: ${error?.message || 'unknown error'}. Try again.`)
+      }
     } finally {
+      if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
+      setWakingBackend(false)
       setLoading(false)
     }
   }
@@ -221,8 +246,21 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             disabled={loading}
             className="px-12 py-4 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold text-lg hover:opacity-90 transition-opacity glow-cyan disabled:opacity-50"
           >
-            {loading ? 'PROCESSING...' : 'SIMULATE GCN ALERT'}
+            {loading ? (wakingBackend ? 'WAKING BACKEND…' : 'PROCESSING…') : 'LAUNCH GCN ALERT'}
           </button>
+
+          {wakingBackend && loading && (
+            <p className="font-mono text-xs text-yellow-400 mt-4 max-w-xl mx-auto">
+              Backend is waking up — Render free-tier cold starts can take ~60s. The pipeline runs automatically once it responds.
+            </p>
+          )}
+
+          {runError && !loading && (
+            <div className="mt-6 max-w-2xl mx-auto glass rounded-xl p-4 border border-red-400/40 text-left">
+              <div className="font-cosmic text-sm text-red-400 mb-1">LAUNCH FAILED</div>
+              <div className="font-mono text-xs text-gray-300">{runError}</div>
+            </div>
+          )}
         </motion.div>
 
         {/* Status indicator + source badge */}

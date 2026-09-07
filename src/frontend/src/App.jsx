@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import HeroSection from './components/HeroSection'
 import MissionSection from './components/MissionSection'
@@ -7,13 +7,21 @@ import ObservatorySection from './components/ObservatorySection'
 import DashboardSection from './components/DashboardSection'
 import Footer from './components/Footer'
 import StarfieldBackground from './components/StarfieldBackground'
+import Loader from './components/Loader'
+import useKeepAlive from './hooks/useKeepAlive'
 
 function App() {
   const [agentStatus, setAgentStatus] = useState('listening')
   const [showApprovalModal, setShowApprovalModal] = useState(false)
+  const [booted, setBooted] = useState(false)
+  const handleBooted = useCallback(() => setBooted(true), [])
+
+  // Hold the Render instance warm while this tab is open (visible tabs only).
+  useKeepAlive(booted)
 
   return (
     <div className="relative min-h-screen bg-void text-white overflow-x-hidden">
+      <AnimatePresence>{!booted && <Loader onDone={handleBooted} />}</AnimatePresence>
       <StarfieldBackground />
       
       <main className="relative z-10">

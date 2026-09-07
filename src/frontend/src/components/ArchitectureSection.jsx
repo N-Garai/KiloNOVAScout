@@ -1,95 +1,94 @@
-import { motion, useInView, AnimatePresence, useScroll } from 'framer-motion'
+import { motion, useInView, useScroll, useTransform } from 'framer-motion'
 import { useRef, useState, useEffect } from 'react'
 
 export default function ArchitectureSection() {
   const ref = useRef(null)
   const isInView = useInView(ref, { once: true, margin: "-200px" })
 
-  const { scrollYProgress, scrollY } = useScroll();
-  const [isScrollingDown, setIsScrollingDown] = useState(false);
-  const lastScrollY = useRef(0);
-  const [workingTraces, setWorkingTraces] = useState([]);
-  const tracesFetchedRef = useRef(false);
+  // Pinned horizontal track: vertical scroll progress over the tall
+  // wrapper drives the card row horizontally (Chronocut storyboard style).
+  // The shift is measured from the real track overflow so the last card
+  // lands exactly at the viewport edge on any screen size — scrolling up
+  // reverses it automatically since it is scroll-driven.
+  const trackWrapRef = useRef(null)
+  const trackRef = useRef(null)
+  const [trackShift, setTrackShift] = useState(0)
+  const { scrollYProgress } = useScroll({ target: trackWrapRef })
+  const trackX = useTransform(scrollYProgress, [0, 1], [0, -trackShift])
 
   useEffect(() => {
-    // framer-motion v11: MotionValue uses .on("change", ...) (v10's .onChange was removed)
-    const unsubscribe = scrollY.on("change", (latest) => {
-      if (latest > lastScrollY.current) {
-        setIsScrollingDown(true);
-      } else {
-        setIsScrollingDown(false);
-      }
-      lastScrollY.current = latest;
-    });
-    return () => unsubscribe();
-  }, [scrollY]);
+    const measure = () => {
+      const el = trackRef.current
+      if (!el) return
+      const overflow = el.scrollWidth - window.innerWidth
+      setTrackShift(overflow > 0 ? overflow : 0)
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [])
 
-  // When the working-details panel becomes visible, load the last run's real
-  // measured dispatch log so the user sees actual step names / statuses /
-  // durations (M5.2), not placeholder text.
-  const panelVisible = isInView && isScrollingDown
-  useEffect(() => {
-    if (!panelVisible || tracesFetchedRef.current) return
-    fetch('/api/latest-event')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        tracesFetchedRef.current = true
-        if (data && Array.isArray(data.execution_traces) && data.execution_traces.length) {
-          setWorkingTraces(data.execution_traces)
-        }
-      })
-      .catch(() => {})
-  }, [panelVisible])
+  // Static class map (no template interpolation — Tailwind JIT safe).
+  const ACCENT = {
+    cyan: "border-cosmic-cyan/40 text-cosmic-cyan",
+    magenta: "border-cosmic-magenta/40 text-cosmic-magenta",
+    purple: "border-cosmic-purple/40 text-cosmic-purple",
+    lime: "border-lime-400/40 text-lime-300",
+    orange: "border-orange-400/40 text-orange-300",
+    pink: "border-pink-400/40 text-pink-300",
+    blue: "border-sky-400/40 text-sky-300",
+    green: "border-green-400/40 text-green-300",
+  }
 
   const agents = [
     {
       name: "Ingestion Agent",
-      purpose: "Filters and normalizes GCN notices",
-      toolCount: 1,
-      color: "cyan"
+      purpose: "Filters and normalizes GCN notices — accepts BNS/NSBH mergers, rejects BBH and retractions.",
+      tools: ["ingestion.filter_gcn"],
+      accent: "cyan",
     },
     {
       name: "HEALPix Triage Agent",
-      purpose: "Parses skymap FITS files and calculates localization",
-      toolCount: 1,
-      color: "magenta"
+      purpose: "Parses skymap FITS files and calculates the 90% localization volume and distance.",
+      tools: ["parse_healpix_map"],
+      accent: "magenta",
     },
     {
       name: "Galaxy Crossmatch Agent",
-      purpose: "Identifies host galaxy candidates in GLADE+ catalog",
-      toolCount: 2,
-      color: "purple"
+      purpose: "Identifies host galaxy candidates in the GLADE+ catalog with full v3 scoring.",
+      tools: ["query_glade_catalog", "compute_full_score"],
+      accent: "purple",
     },
     {
       name: "Ephemeris & Weather Agents",
-      purpose: "Calculates target observability and fetches conditions",
-      toolCount: 3,
-      color: "lime"
+      purpose: "Calculates target observability and fetches live site conditions in parallel.",
+      tools: ["integrated_airmass", "check_observatory_weather", "lunar_penalty"],
+      accent: "lime",
     },
     {
       name: "GRB Validator Agent",
-      purpose: "Performs multi-messenger coincidence checks",
-      toolCount: 1,
-      color: "orange"
+      purpose: "Performs multi-messenger coincidence checks against the GRB catalog.",
+      tools: ["validator.multimessenger"],
+      accent: "orange",
     },
     {
       name: "Scheduler Agent",
-      purpose: "Optimizes telescope slew sequence and generates script",
-      toolCount: 2,
-      color: "pink"
+      purpose: "Optimizes the telescope slew sequence (TSP) and generates the ASCOM/INDI script.",
+      tools: ["optimize_slew_order", "generate_telescope_slew_script"],
+      accent: "pink",
     },
     {
       name: "LLM Rationale Agent",
-      purpose: "Generates human-readable summary and decision justification",
-      toolCount: 1,
-      color: "blue"
+      purpose: "Generates the human-readable summary and decision justification, with plots in parallel.",
+      tools: ["llm.rationale", "generate_run_visualizations"],
+      accent: "blue",
     },
     {
       name: "Human Approval Gate",
-      purpose: "Final human verification before execution",
-      toolCount: 0,
-      color: "green"
-    }
+      purpose: "Final human verification before execution — dome re-checked, one click to fire.",
+      tools: ["check_dome_safety", "approve_slew_script"],
+      accent: "green",
+    },
   ]
 
   const agentFlow = [
@@ -111,6 +110,18 @@ export default function ArchitectureSection() {
     { label: "→", type: "arrow", color: "cosmic-cyan" },
     { label: "Human Approval", description: "1-Click Execute", type: "agent", color: "green" },
   ]
+
+  // Static flow-chip classes (Tailwind JIT safe — no dynamic construction).
+  const FLOW_BG = {
+    "cosmic-cyan": "bg-cosmic-cyan/20",
+    "cosmic-magenta": "bg-cosmic-magenta/20",
+    "cosmic-purple": "bg-cosmic-purple/20",
+    "cosmic-lime": "bg-lime-400/20",
+    "cosmic-orange": "bg-orange-400/20",
+    "cosmic-pink": "bg-pink-400/20",
+    "cosmic-blue": "bg-sky-400/20",
+    "green": "bg-green-400/20",
+  }
 
   return (
     <section id="architecture" ref={ref} className="relative py-32 px-4">
@@ -152,7 +163,7 @@ export default function ArchitectureSection() {
                 {item.type === 'arrow' ? (
                   item.label
                 ) : (
-                  <div className={`p-3 rounded-lg border border-white/10 ${item.type === 'agent-parallel' ? 'bg-gradient-to-r from-cosmic-lime/20 to-cosmic-cyan/20' : `bg-cosmic-${item.color}/20`}`}>
+                  <div className={`p-3 rounded-lg border border-white/10 ${item.type === 'agent-parallel' ? 'bg-gradient-to-r from-lime-400/20 to-cosmic-cyan/20' : (FLOW_BG[item.color] || 'bg-white/5')}`}>
                     <div className="font-cosmic text-sm text-white">{item.label}</div>
                     <div className="font-mono text-xs text-gray-400">{item.description}</div>
                   </div>
@@ -161,69 +172,77 @@ export default function ArchitectureSection() {
             ))}
           </div>
         </motion.div>
+      </div>
 
-        {/* Agent Details Grid */}
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-16">
-          {agents.map((agent, index) => (
-            <motion.div
-              key={index}
-              initial={{ opacity: 0, y: 30 }}
-              animate={isInView ? { opacity: 1, y: 0 } : {}}
-              transition={{ duration: 0.6, delay: 0.4 + index * 0.1 }}
-              className="glass rounded-xl p-6 border border-white/10 hover:border-cosmic-cyan/50 transition-all hover:scale-105"
-            >
-              <div className="flex items-start justify-between mb-3">
-                <h3 className={`font-cosmic text-lg font-bold text-${agent.color}-400`}>
+      {/* AGENT DISCOVERY — pinned horizontal scroll.
+          Scrolling down slides the agent cards left until the last card,
+          then the page continues. Scrolling up slides them back right. */}
+      <div ref={trackWrapRef} className="relative h-[320vh]">
+        <div className="sticky top-0 h-screen flex flex-col justify-center overflow-hidden">
+          <div className="max-w-7xl mx-auto w-full px-4 mb-8">
+            <h3 className="font-cosmic text-3xl md:text-4xl font-bold text-white">
+              AGENT <span className="bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta bg-clip-text text-transparent">DISCOVERY</span>
+            </h3>
+            <p className="font-mono text-xs text-gray-400 mt-2 tracking-widest uppercase">
+              Scroll to travel the pipeline — 8 agents, left to right
+            </p>
+          </div>
+
+          <motion.div ref={trackRef} style={{ x: trackX }} className="flex gap-6 pl-4 md:pl-[max(1rem,calc((100vw-80rem)/2+1rem))] pr-6 w-max items-stretch">
+            {agents.map((agent, index) => (
+              <div
+                key={agent.name}
+                className={`glass rounded-2xl p-7 border ${ACCENT[agent.accent].split(' ')[0]} w-[78vw] sm:w-[52vw] md:w-[30rem] shrink-0 flex flex-col`}
+              >
+                <div className="font-mono text-xs text-gray-500 mb-3 tracking-widest">
+                  {String(index + 1).padStart(2, '0')} / 08
+                </div>
+                <h4 className={`font-cosmic text-2xl font-bold mb-3 ${ACCENT[agent.accent].split(' ')[1]}`}>
                   {agent.name}
-                </h3>
-                {agent.toolCount > 0 && (
-                  <span className="font-mono text-xs text-gray-500 bg-black/50 px-2 py-1 rounded">
-                    {agent.toolCount} Tools
-                  </span>
-                )}
+                </h4>
+                <p className="font-grotesk text-sm text-gray-300 leading-relaxed mb-6 flex-1">
+                  {agent.purpose}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {agent.tools.map((tool) => (
+                    <span
+                      key={tool}
+                      className="font-mono text-[11px] text-gray-300 bg-black/60 border border-white/10 px-2.5 py-1 rounded-md"
+                    >
+                      {tool}()
+                    </span>
+                  ))}
+                </div>
               </div>
-              <p className="font-grotesk text-sm text-gray-300">
-                {agent.purpose}
-              </p>
-            </motion.div>
-          ))}
-        </div>
+            ))}
 
-        {/* Scroll-triggered Working Details Panel */}
-        <AnimatePresence>
-          {scrollYProgress.get() > 0.3 && isScrollingDown && (
-            <motion.div
-              initial={{ opacity: 0, y: 50 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 50 }}
-              transition={{ duration: 0.5 }}
-              className="fixed bottom-8 right-8 w-80 p-6 glass rounded-xl border border-white/10 shadow-lg z-50"
-            >
-              <h3 className="font-cosmic text-xl text-white mb-4">Agent Working Details</h3>
-              <div className="font-mono text-sm text-gray-400 max-h-60 overflow-y-auto custom-scrollbar">
-                {workingTraces.length > 0 ? (
-                  workingTraces.map((trace, i) => (
-                    <p key={i} className="mb-2 flex items-start gap-2">
-                      <span className={trace.status === 'completed' ? 'text-green-400' : trace.status === 'failed' ? 'text-red-400' : 'text-cosmic-cyan'}>
-                        {trace.status === 'completed' ? '✓' : trace.status === 'failed' ? '✕' : '○'}
-                      </span>
-                      <span>
-                        [{String(trace.step).padStart(2, '0')}] {trace.tool_name}
-                        {trace.duration_ms != null && <span className="text-gray-500"> · {trace.duration_ms}ms</span>}
-                        {trace.error && <span className="text-red-400"> · {String(trace.error).slice(0, 60)}</span>}
-                      </span>
-                    </p>
-                  ))
-                ) : (
-                  <>
-                    <p className="mb-2 opacity-70">Waiting for a pipeline run to display live step telemetry.</p>
-                    <p className="mb-2 opacity-50">Run the demo in the section below, then return here to see the measured agent dispatch log.</p>
-                  </>
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            {/* End cap card */}
+            <div className="w-[78vw] sm:w-[52vw] md:w-[30rem] shrink-0 rounded-2xl p-7 border border-cosmic-cyan/40 bg-gradient-to-br from-cosmic-cyan/10 to-cosmic-magenta/10 flex flex-col justify-center">
+              <h4 className="font-cosmic text-2xl font-bold text-white mb-3">
+                Then: human approval
+              </h4>
+              <p className="font-grotesk text-sm text-gray-300 leading-relaxed">
+                The slew script waits for one click. Every step above is measured, logged, and traceable in the live demo below.
+              </p>
+              <a
+                href="#dashboard"
+                className="mt-6 inline-block px-6 py-3 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold text-sm text-center hover:opacity-90 transition-opacity"
+              >
+                GO TO LIVE DEMO
+              </a>
+            </div>
+          </motion.div>
+
+          {/* Scroll progress */}
+          <div className="max-w-7xl mx-auto w-full px-4 mt-8">
+            <div className="h-1 rounded-full bg-white/10 overflow-hidden">
+              <motion.div
+                style={{ scaleX: scrollYProgress }}
+                className="h-full w-full origin-left bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta"
+              />
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   )
