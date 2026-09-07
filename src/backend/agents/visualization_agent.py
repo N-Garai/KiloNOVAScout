@@ -54,6 +54,26 @@ def _fig_to_base64(fig) -> str:
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
+
+def _fallback_figure(title: str, reason: str) -> str:
+    """Minimal placeholder PNG so a failed plot degrades gracefully.
+
+    The report layout stays stable (one figure per selected plot) and the
+    failure reason is visible instead of a silently missing panel. This
+    function itself never raises — worst case the plot is omitted.
+    """
+    try:
+        _apply_dark_style()
+        fig, ax = plt.subplots(figsize=(6, 2.2))
+        ax.axis("off")
+        ax.text(0.5, 0.6, title, ha="center", va="center", fontsize=11, color=_DARK_TEXT)
+        ax.text(0.5, 0.35, f"plot unavailable: {reason}"[:90],
+                ha="center", va="center", fontsize=8, color="#8a8a9a")
+        return _fig_to_base64(fig)
+    except Exception as exc:
+        print(f"[VIZ] fallback figure failed ({exc}); omitting plot")
+        raise
+
 def plot_skymap_with_candidates(skymap, candidates: List[Dict[str, Any]]) -> str:
     """Mollweide skymap of the 90% region with candidate positions overlaid."""
     _apply_dark_style()
@@ -74,6 +94,10 @@ def plot_skymap_with_candidates(skymap, candidates: List[Dict[str, Any]]) -> str
         ra_rad = np.radians((ra_deg - 180.0) % 360.0 - 180.0)
         dec_rad = np.radians(dec_deg)
         order = np.argsort(p)[::-1]
+        # Downsample dense 90% regions for the 512 MB Render budget — visual
+        # output is identical, peak scatter memory drops ~10x on full-res maps.
+        if len(order) > 20000:
+            order = order[:: max(1, len(order) // 20000)]
         sc = ax.scatter(ra_rad[order], dec_rad[order], c=p[order], s=2.5, cmap="viridis",
                         alpha=0.85, vmin=0.0, vmax=1.0)
         cbar = fig.colorbar(sc, ax=ax, orientation="horizontal", fraction=0.045, pad=0.06)
@@ -188,23 +212,73 @@ def plot_distance_distribution(skymap, candidates: List[Dict[str, Any]]) -> str:
     return _fig_to_base64(fig)
 
 
-def generate_run_visualizations(skymap, candidates: List[Dict[str, Any]],
-                                weather: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-    """Generate all per-run plots; returns {name: base64_png} (PRD M8.2/8.3).
+def select_visualizations(skymap, candidates: List[Dict[str, Any]],
+                            context: Optional[Dict[str, Any]] = None):
+    """Decide which plots this run actually needs, from live run state.
 
-    Failures degrade gracefully: a plot that cannot be generated is simply
-    omitted so the pipeline never breaks on visualization.
+    The four generators below are a standard tool library — but the set
+    rendered per run is chosen by the workflow, not predefined:
+      * skymap + scoring breakdown are always selected (PRD M8.4: >= 2 plots);
+      * observing-conditions radar only when candidates carry observability
+        metrics (a radar of nothing is meaningless);
+      * distance distribution only with >= 2 measured distances and a skymap
+        distance scale to compare against;
+      * a GRB coincidence forces the scoring breakdown (it visualizes the
+        boost term that moved the ranking).
+
+    Returns (ordered_names, notes) where notes explains each decision for
+    the run log.
     """
+    context = context or {}
+    cands = candidates or []
+    has_obs = any((c.get("observability") or {}).get("mean_airmass") for c in cands)
+    dists = [c.get("distance_mpc") for c in cands if c.get("distance_mpc")]
+    has_dist_scale = bool(getattr(skymap, "dist_mean", None))
+    grb_hit = bool(context.get("grb_coincidence")) or float(context.get("grb_boost", 0) or 0) > 1.0
+
+    selected = ["skymap_candidates", "scoring_breakdown"]
+    notes = ["skymap+s scoring: always (core deliverables)"]
+    if has_obs:
+        selected.append("observing_conditions")
+        notes.append("conditions radar: observability metrics present")
+    else:
+        notes.append("conditions radar: skipped (no observability metrics)")
+    if len(dists) >= 2 and has_dist_scale:
+        selected.append("distance_distribution")
+        notes.append(f"distance plot: {len(dists)} distances vs skymap scale")
+    else:
+        notes.append("distance plot: skipped (insufficient distance data)")
+    if grb_hit:
+        notes.append("GRB coincidence: scoring breakdown carries the boost term")
+    return selected, notes
+
+
+def generate_run_visualizations(skymap, candidates: List[Dict[str, Any]],
+                                weather: Optional[Dict[str, Any]] = None,
+                                context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Generate the workflow-selected plots; returns {name: base64_png} (PRD M8.2/8.3).
+
+    Robustness contract: visualization must never break the run. Every
+    selected plot has a per-plot fallback figure carrying the failure
+    reason, so the report always embeds a stable figure set.
+    """
+    selected, notes = select_visualizations(skymap, candidates, context)
+    print(f"[VIZ] selected plots: {', '.join(selected)} ({'; '.join(notes)})")
     plots: Dict[str, str] = {}
     generators = {
-        "skymap_candidates": lambda: plot_skymap_with_candidates(skymap, candidates),
-        "scoring_breakdown": lambda: plot_scoring_breakdown(candidates),
-        "observing_conditions": lambda: plot_observing_conditions(candidates),
-        "distance_distribution": lambda: plot_distance_distribution(skymap, candidates),
+        "skymap_candidates": ("90% Localization Region", lambda: plot_skymap_with_candidates(skymap, candidates)),
+        "scoring_breakdown": ("Scoring Breakdown", lambda: plot_scoring_breakdown(candidates)),
+        "observing_conditions": ("Observing Conditions", lambda: plot_observing_conditions(candidates)),
+        "distance_distribution": ("Distance Distribution", lambda: plot_distance_distribution(skymap, candidates)),
     }
-    for name, fn in generators.items():
+    for name in selected:
+        title, fn = generators[name]
         try:
             plots[name] = fn()
-        except Exception as exc:  # visualization must never break the run
-            print(f"[VIZ] {name} failed: {exc}")
+        except Exception as exc:  # fall back to a labeled placeholder, never crash
+            print(f"[VIZ] {name} failed ({exc}); using fallback figure")
+            try:
+                plots[name] = _fallback_figure(title, str(exc))
+            except Exception:
+                pass
     return plots

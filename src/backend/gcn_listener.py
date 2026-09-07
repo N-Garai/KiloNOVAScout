@@ -205,12 +205,26 @@ class GcnListener:
             consumer.subscribe(TOPICS_DEFAULT)
             print(f"[GCN] Listening on {len(TOPICS_DEFAULT)} LVC topics...")
             loop = asyncio.get_running_loop()
+            import functools
+            consecutive_errors = 0
             while self._running:
                 try:
                     # consumer.consume() blocks in librdkafka — never run it
                     # directly on the API event loop or requests stall.
-                    messages = await loop.run_in_executor(None, consumer.consume, 1.0)
-                    for message in messages or []:
+                    # NOTE: timeout MUST be passed by keyword. gcn-kafka's
+                    # first positional parameter is an integer
+                    # (confluent-style num_messages); passing 1.0
+                    # positionally raises "'float' object cannot be
+                    # interpreted as an integer" on every poll.
+                    messages = await loop.run_in_executor(
+                        None, functools.partial(consumer.consume, timeout=1.0)
+                    )
+                    consecutive_errors = 0
+                    if messages is None:
+                        continue
+                    if not isinstance(messages, list):
+                        messages = [messages]
+                    for message in messages:
                         if message is None:
                             continue
                         payload = self._process_message(message)
@@ -222,8 +236,12 @@ class GcnListener:
                             except Exception as e:
                                 print(f"[GCN] on_notice handler error: {e}")
                 except Exception as e:
-                    print(f"[GCN] consume error: {e}")
-                    await asyncio.sleep(1.0)
+                    # Back off on persistent failures (e.g. brokers
+                    # unreachable) instead of spamming the log every second.
+                    consecutive_errors += 1
+                    wait = min(30.0, 1.0 * (2 ** min(consecutive_errors, 5)))
+                    print(f"[GCN] consume error: {e} (retrying in {wait:.0f}s)")
+                    await asyncio.sleep(wait)
         except Exception as e:
             print(f"[GCN] listener error: {e}; mock-only mode.")
         finally:

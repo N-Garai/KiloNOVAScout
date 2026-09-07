@@ -301,7 +301,8 @@ class KilonovaScoutAgent(Agent):
         start = time.perf_counter()
         skymap = await self._try_step("healpix", self.tools_instance.parse_healpix_map, run=run, step=3,
                                       skymap_url=skymap_url, retries=2)
-        await stamp(2, "healpix.parse_skymap", "completed", output_s="skymap parsed",
+        await stamp(2, "healpix.parse_skymap", "completed",
+                    output_s=f"skymap parsed [tier={getattr(skymap, 'provenance_source', 'unknown')}]",
                     duration_ms=int((time.perf_counter() - start) * 1000))
         self.agent_state.current_skymap = skymap
 
@@ -354,7 +355,8 @@ class KilonovaScoutAgent(Agent):
             g = await self._try_step("galaxy", self.tools_instance.query_glade_catalog, run=run, step=5,
                                      skymap=skymap, retries=2)
             g = normalize_priorities(g)
-            await stamp(3, "galaxy.query_catalog", "completed", output_s=f"{len(g)} candidates",
+            await stamp(3, "galaxy.query_catalog", "completed",
+                        output_s=f"{len(g)} candidates [tier={getattr(g[0], 'catalog_source', 'mock') if g else 'mock'}]",
                         duration_ms=int((time.perf_counter() - s) * 1000))
             self.agent_state.candidate_galaxies = g
             return g
@@ -498,6 +500,7 @@ class KilonovaScoutAgent(Agent):
                     skymap,
                     [_galaxy_to_dict(g) for g in galaxies],
                     _weather_to_dict(weather),
+                    {"grb_boost": grb_boost, "grb_coincidence": grb_boost > 1.0},
                 )
             except Exception as exc:
                 print(f"[VIZ] visualization generation failed (continuing): {exc}")
@@ -628,6 +631,7 @@ class KilonovaScoutAgent(Agent):
                 "tool_name": s.tool_name,
                 "status": s.status,
                 "attempt": s.attempt,
+                "started_at": s.started_at,
                 "duration_ms": s.duration_ms,
                 "error": s.error,
                 "input_summary": s.input_summary,

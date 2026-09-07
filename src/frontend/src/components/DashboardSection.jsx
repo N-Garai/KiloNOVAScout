@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import axios from 'axios'
+import AgentTerminal from './AgentTerminal'
 
 export default function DashboardSection({ agentStatus, setAgentStatus, onTargetAcquired }) {
   const [loading, setLoading] = useState(false)
@@ -14,11 +15,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const [reportHtml, setReportHtml] = useState('')
   const [provenance, setProvenance] = useState(null)
   const [showReport, setShowReport] = useState(false)
-  const [expandedTrace, setExpandedTrace] = useState(null)
   const [runError, setRunError] = useState('')
   const [wakingBackend, setWakingBackend] = useState(false)
   const esRef = useRef(null)
-  const tracesEndRef = useRef(null)
   const wakeTimerRef = useRef(null)
 
   // Close EventSource + timers on unmount
@@ -28,13 +27,6 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
     }
   }, [])
-
-  // Auto-scroll trace list
-  useEffect(() => {
-    if (tracesEndRef.current) {
-      tracesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    }
-  }, [executionTraces.length])
 
   const simulateEvent = async () => {
     setLoading(true)
@@ -50,10 +42,34 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     // appearing to do nothing.
     wakeTimerRef.current = setTimeout(() => setWakingBackend(true), 10000)
 
+    // Render's proxy kills requests when the free instance restarts
+    // mid-run (HTTP 502/503/504). Retry once automatically — the second
+    // attempt usually lands on the freshly woken instance.
+    const postLaunch = (ms) => axios.post('/api/simulate-event', null, { timeout: ms })
+    let response = null
+    let lastError = null
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        // 3-minute timeout: full pipeline (skymap + TAP + LLM + plots) is slow
+        // on a cold free-tier instance.
+        response = await postLaunch(180000)
+        lastError = null
+        break
+      } catch (err) {
+        lastError = err
+        const status = err?.response?.status
+        const transient = !err?.response || [502, 503, 504].includes(status)
+        if (transient && attempt === 1) {
+          setWakingBackend(true)
+          await new Promise((r) => setTimeout(r, 8000))
+          continue
+        }
+        break
+      }
+    }
+
     try {
-      // 3-minute timeout: full pipeline (skymap + TAP + LLM + plots) is slow
-      // on a cold free-tier instance.
-      const response = await axios.post('/api/simulate-event', null, { timeout: 180000 })
+      if (!response) throw lastError
       const data = response.data
       setAlertData(data.alert)
       setCandidates(data.candidates || [])
@@ -80,12 +96,15 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     } catch (error) {
       console.error('Simulation failed:', error)
       const status = error?.response?.status
+      const detail = error?.response?.data?.detail
       if (error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')) {
-        setRunError('Request timed out — the free-tier backend may still be waking up or the pipeline exceeded 3 minutes. Wait a minute and try again.')
+        setRunError('Request timed out — the free-tier backend may still be waking up or the pipeline exceeded 3 minutes (auto-retried once). Wait a minute and launch again.')
       } else if (error?.request && !error?.response) {
         setRunError('Could not reach the backend. If it just woke from sleep, wait ~60 seconds and launch again.')
+      } else if (status === 502 || status === 503 || status === 504) {
+        setRunError(`Render restarted the backend mid-run (HTTP ${status}, auto-retried once). The instance should be warm now — press LAUNCH GCN ALERT again.`)
       } else if (status) {
-        setRunError(`Backend returned HTTP ${status}. Check the service logs and try again.`)
+        setRunError(detail ? `Backend error (HTTP ${status}): ${detail}` : `Backend returned HTTP ${status}. Check the service logs and try again.`)
       } else {
         setRunError(`Launch failed: ${error?.message || 'unknown error'}. Try again.`)
       }
@@ -238,7 +257,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             LIVE DEMO
           </h2>
           <p className="font-grotesk text-xl text-gray-400 max-w-3xl mx-auto mb-8">
-            Simulate the famous GW170817 neutron star merger event
+            Listening to the live NASA GCN stream — triage fires on the latest gravitational-wave trigger.
+            When the sky is quiet, the agent replays the archived GW170817 merger as a fallback simulation.
           </p>
 
           <button
@@ -313,77 +333,16 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           </motion.div>
         )}
 
-        {/* Live execution timeline (M3: real-time, spinner -> check, expanders) */}
-        {executionTraces.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="glass rounded-xl p-6 mb-8 border border-cosmic-cyan/30"
-          >
-            <div className="font-cosmic text-sm text-cosmic-cyan mb-4">LIVE AGENT TIMELINE</div>
-            <div className="space-y-3 font-mono text-xs max-h-96 overflow-y-auto pr-2">
-              {executionTraces.map((trace, index) => {
-                const isRunning = trace.status === 'running'
-                const isFailed = trace.status === 'failed' || trace.status === 'skipped'
-                return (
-                  <motion.div
-                    key={`${trace.step}-${trace.tool_name}`}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    className="flex flex-col gap-2"
-                  >
-                    <div className="flex items-start gap-3">
-                    <span className="text-gray-500">[{trace.step}]</span>
-                    <span className="text-cosmic-magenta">{trace.tool_name}()</span>
-                    <span className={`px-2 py-0.5 rounded text-xs ${
-                      isRunning ? 'bg-yellow-500/20 text-yellow-400 animate-pulse' :
-                      isFailed ? 'bg-red-500/20 text-red-400' :
-                      'bg-green-500/20 text-green-400'
-                    }`}>
-                      {isRunning ? '⟳ ' : isFailed ? '✗ ' : '✓ '}{trace.status.toUpperCase()}
-                    </span>
-                    {trace.duration_ms != null && (
-                      <span className="text-gray-500">{trace.duration_ms}ms</span>
-                    )}
-                    {trace.attempt > 1 && (
-                      <span className="text-yellow-400">attempt {trace.attempt}</span>
-                    )}
-                    <button
-                      onClick={() => setExpandedTrace(expandedTrace === `${trace.step}-${trace.tool_name}` ? null : `${trace.step}-${trace.tool_name}`)}
-                      className="text-gray-500 hover:text-cosmic-cyan transition-colors"
-                    >
-                      {expandedTrace === `${trace.step}-${trace.tool_name}` ? '▲' : '▼'}
-                    </button>
-                    </div>
-                    {expandedTrace === `${trace.step}-${trace.tool_name}` && (
-                      <div className="w-full mt-1 p-3 bg-black/50 rounded border border-white/5">
-                        {trace.input_summary && (
-                          <div className="mb-2">
-                            <span className="text-gray-500">in: </span>
-                            <span className="text-gray-300 break-all">{typeof trace.input_summary === 'string' ? trace.input_summary : JSON.stringify(trace.input_summary)}</span>
-                          </div>
-                        )}
-                        {trace.output_summary && (
-                          <div className="mb-2">
-                            <span className="text-gray-500">out: </span>
-                            <span className="text-gray-300 break-all">{typeof trace.output_summary === 'string' ? trace.output_summary : JSON.stringify(trace.output_summary)}</span>
-                          </div>
-                        )}
-                        {trace.error && (
-                          <div>
-                            <span className="text-red-400">err: </span>
-                            <span className="text-red-300 break-all">{trace.error}</span>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </motion.div>
-                )
-              })}
-              <div ref={tracesEndRef} />
-            </div>
-          </motion.div>
-        )}
+        {/* Mission-log console: full backend workflow — agent + tool per
+            row, indented subagent retries, fallback tiers, in/out payloads */}
+        <AgentTerminal
+          traces={executionTraces}
+          provenance={provenance}
+          runId={runId}
+          source={source}
+          agentStatus={agentStatus}
+          loading={loading}
+        />
 
         {/* Alert data */}
         {alertData && (

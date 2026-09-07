@@ -20,7 +20,7 @@ function App() {
   useKeepAlive(booted)
 
   return (
-    <div className="relative min-h-screen bg-void text-white overflow-x-hidden">
+    <div className="relative min-h-screen bg-void text-white overflow-x-clip">
       <AnimatePresence>{!booted && <Loader onDone={handleBooted} />}</AnimatePresence>
       <StarfieldBackground />
       

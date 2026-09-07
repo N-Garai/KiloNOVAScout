@@ -16,6 +16,7 @@ Render-compatible FastAPI service exposing:
 import os
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
@@ -68,10 +69,35 @@ OBSERVATORY_ALT = _get_float("OBSERVATORY_ALT", 1706)
 PRIMARY_LLM = os.getenv("PRIMARY_LLM", "gemini/gemini-1.5-flash")
 FALLBACK_LLM = os.getenv("FALLBACK_LLM", "groq/llama3-70b-8192")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start the GCN listener (non-blocking; mock-only without creds).
+
+    Module-global agent/tools are resolved at call time, so this is defined
+    before the app and passed to the constructor (replaces deprecated
+    @app.on_event("startup")).
+    """
+    try:
+        listener = GcnListener(on_notice=kilonova_agent.handle_live_notice)
+        asyncio.ensure_future(listener._run())
+        app.state.gcn_listener = listener
+        logger.info("[startup] GCN listener scheduled (mock-only mode if no creds).")
+    except Exception as e:
+        logger.warning(f"[startup] GCN listener start failed (continuing): {e}")
+    yield
+    try:
+        listener = getattr(app.state, "gcn_listener", None)
+        if listener is not None:
+            listener.stop()
+    except Exception:
+        pass
+
+
 app = FastAPI(
     title="KilonovaScout Backend API",
     description="Autonomous Multi-Messenger Astronomy Targeting Agent.",
     version="3.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -264,8 +290,13 @@ async def simulate_gcn_alert():
 
 @app.post("/api/simulate-event")
 async def api_simulate_event():
-    mock_payload = event_simulator.get_mock_gw170817_payload()
-    agent_output = await kilonova_agent.run_mock_event()
+    try:
+        agent_output = await kilonova_agent.run_mock_event()
+    except Exception as exc:
+        # Never drop the connection: surface pipeline crashes as JSON 500
+        # (a bare 502 from the proxy means the process itself died).
+        logger.exception(f"[API] simulate-event crashed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Pipeline crashed: {exc}")
     global _latest_run_id
     _latest_run_id = kilonova_agent.agent_state.run_id
     return await _build_simulate_response(agent_output, _latest_run_id)
@@ -422,6 +453,11 @@ if os.path.isdir(DIST_DIR):
     async def serve_root():
         return FileResponse(os.path.join(DIST_DIR, "index.html"))
 
+    @app.head("/", include_in_schema=False)
+    async def serve_root_head():
+        # Render's port scanner probes HEAD / — answer 200 instead of 405.
+        return Response(status_code=200)
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
         if full_path.startswith(("api/", "agent/", "health", "openapi.json", "docs", "redoc")):
@@ -430,19 +466,6 @@ if os.path.isdir(DIST_DIR):
         if full_path and os.path.isfile(candidate):
             return FileResponse(candidate)
         return FileResponse(os.path.join(DIST_DIR, "index.html"))
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    """Start the GCN listener (non-blocking; mock-only without creds)."""
-    try:
-        loop = asyncio.get_event_loop()
-        listener = GcnListener(on_notice=kilonova_agent.handle_live_notice)
-        asyncio.ensure_future(listener._run())
-        app.state.gcn_listener = listener
-        logger.info("[startup] GCN listener scheduled (mock-only mode if no creds).")
-    except Exception as e:
-        logger.warning(f"[startup] GCN listener start failed (continuing): {e}")
 
 
 if __name__ == "__main__":

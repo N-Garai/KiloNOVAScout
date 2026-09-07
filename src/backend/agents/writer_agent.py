@@ -125,6 +125,12 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
     lines.append("")
     lines.append(f"- Data provenance: skymap = `{prov.get('skymap', 'unknown')}`, "
                  f"catalog = `{prov.get('catalog', 'unknown')}`, event = `{prov.get('event', record.source)}`")
+    if (prov.get('event', record.source) or record.source) == "live":
+        lines.append("- **Live trigger:** this run processed a real notice from the NASA GCN stream.")
+    else:
+        lines.append("- **Fallback simulation:** no live trigger was pending at launch, so this run "
+                     "replays the archived GW170817 packet as a stand-in. Every downstream data tier "
+                     "(skymap / catalog) is labeled per stage — nothing is presented as live sky data.")
     lines.append("")
 
     lines.append("## Sky Localization")
@@ -416,6 +422,13 @@ def build_report_latex(record, weights: Optional[Dict[str, float]] = None) -> st
     tex.append(r"  \item Time: \texttt{" + _tex_escape(event.get("event_time", "unknown")) + "}")
     tex.append(r"  \item Data provenance: skymap=\texttt{" + _tex_escape(prov.get("skymap", "unknown")) +
                r"}, catalog=\texttt{" + _tex_escape(prov.get("catalog", "unknown")) + "}")
+    _live = (prov.get("event", record.source) or record.source) == "live"
+    if _live:
+        tex.append(r"  \item Live trigger: this run processed a real notice from the NASA GCN stream.")
+    else:
+        tex.append(r"  \item Fallback simulation: no live trigger was pending at launch, so this run "
+                   r"replays the archived GW170817 packet as a stand-in. Every downstream data tier "
+                   r"is labeled per stage.")
     tex.append(r"\end{itemize}")
     tex.append(r"\section{Sky Localization}")
     tex.append(r"\begin{equation} P(\hat{n}) = \mathrm{PROB}(\hat{n}), \quad"
