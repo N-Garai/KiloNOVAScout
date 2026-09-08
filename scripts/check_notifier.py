@@ -49,6 +49,13 @@ p = build_alert_payload(rec())
 check("headline names event + top target",
       "S1" in p["text"] and "NGC 4993" in p["text"], p["text"])
 check("report path present", p["report_path"] == "/api/runs/live-1/report", p["report_path"])
+check("report_url relative without base", p["report_url"] == "/api/runs/live-1/report", p["report_url"])
+os.environ["RENDER_EXTERNAL_URL"] = "https://kilonovascout.onrender.com/"
+p2 = build_alert_payload(rec())
+check("report_url absolute with base",
+      p2["report_url"] == "https://kilonovascout.onrender.com/api/runs/live-1/report",
+      p2["report_url"])
+os.environ.pop("RENDER_EXTERNAL_URL", None)
 check("gate + provenance carried",
       p["gate"]["status"] == "ACCEPTED" and p["provenance"]["skymap"] == "live")
 check("empty candidates safe",

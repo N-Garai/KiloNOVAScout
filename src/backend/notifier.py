@@ -41,6 +41,12 @@ def build_alert_payload(record: Any) -> Dict[str, Any]:
     top = candidates[0] if candidates else {}
     status = _get_dict_attr(record, "status", "unknown")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    report_path = f"/api/runs/{_get_dict_attr(record, 'run_id')}/report"
+    # Absolute link when the public base URL is known (Render injects
+    # RENDER_EXTERNAL_URL): a relative path is useless inside a phone
+    # notification, so prefer the clickable form and keep the path too.
+    base = (os.getenv("RENDER_EXTERNAL_URL", "") or "").strip().rstrip("/")
+    report_url = f"{base}{report_path}" if base else report_path
     headline = (
         f"KilonovaScout {status.upper()}: "
         f"{event.get('class_label') or event.get('event_class') or 'event'} "
@@ -74,7 +80,8 @@ def build_alert_payload(record: Any) -> Dict[str, Any]:
         "provenance": dict(prov),
         "observatory": weather.get("observatory_name"),
         "dome_safe": weather.get("dome_safe"),
-        "report_path": f"/api/runs/{_get_dict_attr(record, 'run_id')}/report",
+        "report_path": report_path,
+        "report_url": report_url,
         "at": now,
     }
 

@@ -179,9 +179,12 @@ watching the sky unattended and waking a human on every cosmic event.
 
 "Live" is tracked **per input**, never as a single claim. Every run carries
 provenance `{skymap, catalog, event, weather}` with values `live | replay |
-cached | synthetic | mock`, shown in the dashboard badge, the telemetry
-console, and the report header. A run can legitimately be a mock trigger
-with a live catalog and live weather — the UI always says which is which.
+cached | point | synthetic | mock`, shown in the dashboard badge, the
+telemetry console, and the report header (`point` = map built from the
+notice's own coordinates, e.g. GRB/neutrino error circles — real
+localization, not a FITS download). A run can legitimately be a mock
+trigger with a live catalog and live weather — the UI always says which
+is which.
 The telemetry console additionally shows the exact signal path (the Kafka
 topic or poll source the trigger arrived on) and a watching strip with the
 currently subscribed topics and poller state, so there is never ambiguity

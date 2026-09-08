@@ -84,6 +84,16 @@ def _exclusive_run(fn):
     return wrapper
 
 
+async def _record_agent_status(run_id: str, agent_status: str) -> None:
+    """Persist the DAG outcome (awaiting_approval / weather_blocked / error)
+    into the run record so background/streaming consumers can read the final
+    frontend status without touching shared agent state."""
+    try:
+        await run_registry.attach(run_id, event_update={"agent_status": agent_status or "unknown"})
+    except Exception:
+        pass
+
+
 async def _attach_weather_tier(run_id: str) -> None:
     """Record the weather data tier (live vs fallback) in provenance."""
     try:
@@ -330,8 +340,13 @@ class KilonovaScoutAgent(Agent):
         self._trace_callback = cb
 
     @_exclusive_run
-    async def process_gcn_event(self, payload: GcnKafkaPayload) -> AgentOutput:
-        """Live entry point: run the DAG with source='live'."""
+    async def process_gcn_event(self, payload: GcnKafkaPayload, run: Optional[RunRecord] = None) -> AgentOutput:
+        """Live entry point: run the DAG with source='live'.
+
+        ``run`` accepts a pre-created record (streaming flow: the API creates
+        the run so it can hand the id to the UI first).  When omitted, the
+        record is created here exactly as before (legacy callers unaffected).
+        """
         superevent_id = SkymapUpdateTracker.superevent_id(payload.voevent.ivorn or "")
         if not claim_live_trigger(superevent_id):
             prior = live_run_id(superevent_id)
@@ -343,8 +358,16 @@ class KilonovaScoutAgent(Agent):
                          "run_id": prior},
                 action_status="skipped",
             )
-        event_summary = _serialize_event(payload.voevent, topic=payload.topic)
-        run = await run_registry.create_run(source="live", event=event_summary)
+        if run is None:
+            run = await run_registry.create_run(
+                source="live", event=_serialize_event(payload.voevent, topic=payload.topic))
+        else:
+            # Streaming flow: enrich the placeholder record in place.
+            await run_registry.attach(run.run_id, event_update=_serialize_event(
+                payload.voevent, topic=payload.topic))
+            buffer_record = await run_registry.get_record(run.run_id)
+            if buffer_record is not None:
+                buffer_record.source = "live"
         note_live_run(superevent_id, run.run_id)
         self.agent_state.run_id = run.run_id
         self.agent_state.last_gcn_event = payload.voevent.ivorn
@@ -359,12 +382,14 @@ class KilonovaScoutAgent(Agent):
                 slew_script=self.agent_state.slew_script.script_content if self.agent_state.slew_script else None,
             )
             await _attach_weather_tier(run.run_id)
+            await _record_agent_status(run.run_id, self.agent_state.status)
             await _notify_run_complete(run.run_id)
             return output
         except Exception as exc:
-            await run_registry.finish_run(run.run_id, "failed", error=str(exc))
-            await _notify_run_complete(run.run_id)
             self.agent_state.status = "error"
+            await run_registry.finish_run(run.run_id, "failed", error=str(exc))
+            await _record_agent_status(run.run_id, "error")
+            await _notify_run_complete(run.run_id)
             return AgentOutput(message=f"Pipeline error: {exc}", details={"error": str(exc)}, action_status="failure")
 
     async def handle_live_notice(self, payload: GcnKafkaPayload) -> None:
@@ -387,10 +412,22 @@ class KilonovaScoutAgent(Agent):
         return AgentOutput(message="No pending script.", action_status="failure")
 
     @_exclusive_run
-    async def run_mock_event(self, event_class: str = "bns") -> AgentOutput:
-        """Reproducible mock run for any supported event class."""
+    async def run_mock_event(self, event_class: str = "bns", run: Optional[RunRecord] = None) -> AgentOutput:
+        """Reproducible mock run for any supported event class.
+
+        ``run`` accepts a pre-created record (streaming flow); omitted means
+        legacy behavior (record created here).
+        """
         payload = self.simulator.get_payload(event_class)
-        run = await run_registry.create_run(source="mock", event=_serialize_event(payload.voevent, topic=payload.topic))
+        if run is None:
+            run = await run_registry.create_run(
+                source="mock", event=_serialize_event(payload.voevent, topic=payload.topic))
+        else:
+            await run_registry.attach(run.run_id, event_update=_serialize_event(
+                payload.voevent, topic=payload.topic))
+            buffer_record = await run_registry.get_record(run.run_id)
+            if buffer_record is not None:
+                buffer_record.source = "mock"
         self.agent_state.run_id = run.run_id
         self.agent_state.last_gcn_event = payload.voevent.ivorn
         self.agent_state.source = "mock"
@@ -404,12 +441,14 @@ class KilonovaScoutAgent(Agent):
                 slew_script=self.agent_state.slew_script.script_content if self.agent_state.slew_script else None,
             )
             await _attach_weather_tier(run.run_id)
+            await _record_agent_status(run.run_id, self.agent_state.status)
             await _notify_run_complete(run.run_id)
             return output
         except Exception as exc:
-            await run_registry.finish_run(run.run_id, "failed", error=str(exc))
-            await _notify_run_complete(run.run_id)
             self.agent_state.status = "error"
+            await run_registry.finish_run(run.run_id, "failed", error=str(exc))
+            await _record_agent_status(run.run_id, "error")
+            await _notify_run_complete(run.run_id)
             return AgentOutput(message=f"Mock pipeline error: {exc}", details={"error": str(exc)}, action_status="failure")
 
     async def _run_dag(self, payload: GcnKafkaPayload, run: RunRecord) -> AgentOutput:
@@ -472,7 +511,7 @@ class KilonovaScoutAgent(Agent):
                                           ra_deg=float(point_ra), dec_deg=float(point_dec),
                                           radius_deg=point_err, retries=1)
             await stamp(2, "healpix.point_localize", "completed",
-                        output_s=f"point map, {float(getattr(skymap, 'localization_area_sq_deg', 0.0) or 0.0):.1f} deg² [tier=synthetic]",
+                        output_s=f"point map, {float(getattr(skymap, 'localization_area_sq_deg', 0.0) or 0.0):.1f} deg² [tier=point]",
                         duration_ms=int((time.perf_counter() - start) * 1000))
         else:
             await stamp(2, "healpix.parse_skymap", "running", input_s=skymap_url)

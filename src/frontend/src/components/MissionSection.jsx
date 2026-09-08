@@ -26,7 +26,7 @@ export default function MissionSection() {
   ]
 
   return (
-    <section ref={ref} className="relative py-32 px-4">
+    <section id="problem" ref={ref} className="relative py-32 px-4">
       {/* Background gradient */}
       <div className="absolute inset-0 bg-gradient-to-b from-transparent via-cosmic-purple/5 to-transparent" />
 

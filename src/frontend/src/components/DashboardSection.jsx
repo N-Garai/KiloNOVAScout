@@ -24,14 +24,89 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const [simClass, setSimClass] = useState('bns')
   const [watchSaving, setWatchSaving] = useState(false)
   const esRef = useRef(null)
-  const wakeTimerRef = useRef(null)
+  const finishTimerRef = useRef(null)
+  const loadingRef = useRef(false)
+  loadingRef.current = loading
+  const runIdRef = useRef('')
+  runIdRef.current = runId
 
   // Close EventSource + timers on unmount
   useEffect(() => {
     return () => {
       if (esRef.current) esRef.current.close()
-      if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
+      if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
     }
+  }, [])
+
+  // Adopt a finished run (usually auto-fired live, discovered via
+  // latest-event) into the full dashboard state: terminal, candidates,
+  // provenance, rationale, approval modal when warranted.
+  const adoptFinishedRun = (data, sourceOverride) => {
+    const ev = data.event || {}
+    const classMap = {
+      bns: 'Binary Neutron Star Merger',
+      grb: 'Gamma-Ray Burst',
+      neutrino: 'High-Energy Neutrino Track',
+    }
+    const agentMap = {
+      awaiting_approval: 'target_acquired',
+      weather_blocked: 'monitoring',
+      error: 'error',
+      rejected: 'rejected',
+      skipped: 'skipped',
+    }
+    const status = data.status === 'failed'
+      ? 'error'
+      : (agentMap[ev.agent_status] || (data.status === 'completed' ? 'target_acquired' : 'processing'));
+    setRunId(data.run_id)
+    setAlertData({
+      alert_id: ev.trigger_id || ev.ivorn || 'GW170817',
+      topic: ev.topic || '',
+      event_type: classMap[ev.event_class] || 'Binary Neutron Star Merger',
+      ivorn: ev.ivorn || 'GW170817',
+      observatory: '',
+      source: sourceOverride || data.source || 'mock',
+      event_class: ev.event_class || 'bns',
+      class_label: ev.class_label || '',
+      gate_status: ev.gate_status,
+      gate_reason: ev.gate_reason,
+    })
+    setCandidates(data.candidates || [])
+    setAgentStatus(status)
+    setSource(sourceOverride || data.source || 'mock')
+    setLlmRationale(data.llm_rationale || '')
+    setProvenance(data.provenance || null)
+    setLiveFound((sourceOverride || data.source) === 'live')
+    setLiveNote('')
+    setReportMarkdown('')
+    setReportHtml('')
+    if (Array.isArray(data.execution_traces) && data.execution_traces.length > 0) {
+      data.execution_traces.forEach(mergeStep)
+    }
+    if (status === 'target_acquired') {
+      setTimeout(() => onTargetAcquired && onTargetAcquired(), 800)
+    }
+  }
+
+  // 24/7 review: on open — and every 30s while idle — adopt whatever run
+  // finished last (often a poller/Kafka-fired live run nobody clicked for).
+  // Never clobbers an in-flight user view.
+  useEffect(() => {
+    let alive = true
+    const checkLatest = async () => {
+      if (!alive || loadingRef.current) return
+      try {
+        const { data } = await axios.get('/api/latest-event')
+        if (!alive || loadingRef.current) return
+        if (data && data.run_id && data.run_id !== runIdRef.current) {
+          adoptFinishedRun(data)
+        }
+      } catch { /* backend asleep or no runs yet */ }
+    }
+    checkLatest()
+    const timer = setInterval(checkLatest, 30000)
+    return () => { alive = false; clearInterval(timer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const [watchTopics, setWatchTopics] = useState([])
@@ -77,6 +152,38 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     }
   }
 
+  // Fetch the finished run state (candidates, rationale, provenance) once
+  // the SSE stream delivers the terminal run-finished event.
+  const finishRun = async (rid) => {
+    try {
+      const { data } = await axios.get(`/api/runs/${rid}`)
+      setAlertData(data.alert)
+      setCandidates(data.candidates || [])
+      setAgentStatus(data.status)
+      setSource(data.alert?.source || 'mock')
+      setLlmRationale(data.llm_rationale || '')
+      setProvenance(data.provenance || null) // v3 data-source attribution badge (M4.4)
+      setLiveFound(!!data.live_trigger_found)
+      setLiveNote(data.live_check_note || '')
+      setReportMarkdown('')
+      setReportHtml('')
+      // Merge the full persisted step history: covers anything emitted
+      // before the SSE subscription connected.
+      if (Array.isArray(data.execution_traces) && data.execution_traces.length > 0) {
+        data.execution_traces.forEach(mergeStep)
+      }
+      if (data.status === 'target_acquired') {
+        setTimeout(() => onTargetAcquired && onTargetAcquired(), 800)
+      }
+    } catch (error) {
+      console.error('Run fetch failed:', error)
+      setRunError('Run finished but its results could not be fetched. Reload and check the latest event.')
+    } finally {
+      if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
+      setLoading(false)
+    }
+  }
+
   const simulateEvent = async () => {
     setLoading(true)
     setRunError('')
@@ -87,14 +194,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     setAlertData(null)
     setReportMarkdown('')
 
-    // Render free-tier cold starts can take ~60s. If the backend has not
-    // answered after 10s, tell the user it is waking up instead of
-    // appearing to do nothing.
-    wakeTimerRef.current = setTimeout(() => setWakingBackend(true), 10000)
-
-    // Wake-then-launch: Render free spins down after ~15 min idle, and
-    // firing the 3-minute pipeline at a half-booted server is what produced
-    // the 502s. Ping until the backend answers (up to ~90s) BEFORE launching.
+    // Wake-then-launch: Render free spins down after ~15 min idle — ping
+    // until the backend answers (up to ~90s) BEFORE launching anything.
     setWakingBackend(true)
     const warmDeadline = Date.now() + 90000
     let warm = false
@@ -110,70 +211,31 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     setWakingBackend(false)
     if (!warm) {
       setRunError('Backend did not wake within 90 seconds — Render may be queuing the free instance. Wait a minute and launch again.')
-      if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
       setLoading(false)
       return
     }
 
-    // Render's proxy kills requests when the free instance restarts
-    // mid-run (HTTP 502/503/504). Retry once automatically — the second
-    // attempt usually lands on the freshly woken instance.
-    const postLaunch = (ms) => axios.post(`/api/simulate-event?event_class=${encodeURIComponent(simClass)}`, null, { timeout: ms })
-    let response = null
-    let lastError = null
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        // 3-minute timeout: full pipeline (skymap + TAP + LLM + plots) is slow
-        // on a cold free-tier instance.
-        response = await postLaunch(180000)
-        lastError = null
-        break
-      } catch (err) {
-        lastError = err
-        const status = err?.response?.status
-        const transient = !err?.response || [502, 503, 504].includes(status)
-        if (transient && attempt === 1) {
-          setWakingBackend(true)
-          await new Promise((r) => setTimeout(r, 8000))
-          continue
-        }
-        break
-      }
-    }
-
+    // Streaming launch: POST returns instantly with a run id; steps arrive
+    // over SSE as each agent finishes, and completion triggers the fetch.
+    // Guard: if no finish event arrives in ~5 minutes, stop waiting loudly.
     try {
-      if (!response) throw lastError
-      const data = response.data
-      setAlertData(data.alert)
-      setCandidates(data.candidates || [])
-      setAgentStatus(data.status)
-      setSource(data.alert?.source || 'mock')
-      setLlmRationale(data.llm_rationale || '')
-      setProvenance(data.provenance || null) // v3 data-source attribution badge (M4.4)
-      setLiveFound(!!data.live_trigger_found)
-      setLiveNote(data.live_check_note || '')
-      setReportMarkdown('')
-      setReportHtml('')
-
-      // Seed with the measured traces from the response (they may arrive before SSE connects)
-      if (Array.isArray(data.execution_traces) && data.execution_traces.length > 0) {
-        setExecutionTraces(data.execution_traces.map((t, i) => ({ ...t, _key: `${t.step}-${i}` })))
-      }
-
-      if (data.run_id) {
-        setRunId(data.run_id)
-        startEventStream(data.run_id)
-      }
-
-      if (data.status === 'target_acquired') {
-        setTimeout(() => onTargetAcquired && onTargetAcquired(), 800)
-      }
+      const { data } = await axios.post(
+        `/api/simulate-event?event_class=${encodeURIComponent(simClass)}`,
+        null, { timeout: 30000 })
+      const rid = data.run_id
+      if (!rid) throw new Error('backend did not return a run id')
+      setRunId(rid)
+      startEventStream(rid, () => finishRun(rid))
+      finishTimerRef.current = setTimeout(() => {
+        setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
+        setLoading(false)
+      }, 5 * 60 * 1000)
     } catch (error) {
-      console.error('Simulation failed:', error)
+      console.error('Launch failed:', error)
       const status = error?.response?.status
       const detail = error?.response?.data?.detail
       if (error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')) {
-        setRunError('Request timed out — the free-tier backend may still be waking up or the pipeline exceeded 3 minutes (auto-retried once). Wait a minute and launch again.')
+        setRunError('Launch request timed out — the backend may be waking up. Wait ~60 seconds and launch again.')
       } else if (error?.request && !error?.response) {
         setRunError('Could not reach the backend. If it just woke from sleep, wait ~60 seconds and launch again.')
       } else if (status === 429) {
@@ -183,23 +245,27 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           // A run (live trigger or earlier demo) is already in flight:
           // attach this tab to its live telemetry instead of erroring out.
           setRunId(busyRun)
-          startEventStream(busyRun)
           setLiveFound(false)
           setLiveNote(`Pipeline busy — attached to the in-progress run ${busyRun}. Watch it stream below.`)
+          startEventStream(busyRun, () => finishRun(busyRun))
+          finishTimerRef.current = setTimeout(() => {
+            setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
+            setLoading(false)
+          }, 5 * 60 * 1000)
         } else {
           setRunError('Pipeline busy — another run is in progress. Wait for it to finish, then launch again.')
+          setLoading(false)
         }
       } else if (status === 502 || status === 503 || status === 504) {
-        setRunError(`Render restarted the backend mid-run (HTTP ${status}, auto-retried once). The instance should be warm now — press LAUNCH GCN ALERT again.`)
+        setRunError(`Backend unavailable (HTTP ${status}). It may be restarting — wait a minute and launch again.`)
+        setLoading(false)
       } else if (status) {
-        setRunError(detail ? `Backend error (HTTP ${status}): ${detail}` : `Backend returned HTTP ${status}. Check the service logs and try again.`)
+        setRunError(detail && typeof detail === 'string' ? `Backend error (HTTP ${status}): ${detail}` : `Backend returned HTTP ${status}. Check the service logs and try again.`)
+        setLoading(false)
       } else {
         setRunError(`Launch failed: ${error?.message || 'unknown error'}. Try again.`)
+        setLoading(false)
       }
-    } finally {
-      if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
-      setWakingBackend(false)
-      setLoading(false)
     }
   }
 
@@ -235,14 +301,24 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     })
   }
 
-  const startEventStream = (runId) => {
+  const startEventStream = (runId, onFinish) => {
     if (!runId) return
     if (esRef.current) esRef.current.close()
+    let finished = false
     const evtSource = new EventSource(`/api/runs/${runId}/events`)
     evtSource.onmessage = (evt) => {
       try {
         const step = JSON.parse(evt.data)
         mergeStep(step)
+        // Terminal run-finished marker (emitted by finish_run): stop the
+        // stream and pull the complete run state.
+        const terminal = ['completed', 'failed', 'skipped'].includes(step.status)
+        if (!finished && step.tool_name === 'run' && terminal) {
+          finished = true
+          evtSource.close()
+          if (onFinish) onFinish()
+          else setLoading(false)
+        }
       } catch { /* ignore malformed frame */ }
     }
     evtSource.onerror = () => {

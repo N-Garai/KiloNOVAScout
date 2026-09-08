@@ -35,7 +35,7 @@ class HealpixSkymap(BaseModel):
     probdensity: List[float] = Field(..., description="Probability density values for each pixel.")
     supercell_indices: List[int] = Field(..., description="Indices of significant HEALPix supercells.")
     localization_area_sq_deg: float = Field(..., description="Area of localization in square degrees.")
-    provenance_source: Optional[str] = Field(None, description="live | replay | synthetic")
+    provenance_source: Optional[str] = Field(None, description="live | replay | synthetic | point (built from notice RA/Dec)")
     dist_mean: Optional[float] = Field(None, description="Probability-weighted mean luminosity distance (Mpc).")
     dist_std: Optional[float] = Field(None, description="Probability-weighted distance uncertainty (Mpc).")
 
@@ -120,7 +120,7 @@ class RunRecord(BaseModel):
     candidates: List[Dict[str, Any]] = Field(default_factory=list, description="Final candidate summary.")
     weather: Optional[Dict[str, Any]] = Field(None, description="Weather snapshot for the run.")
     slew_script: Optional[str] = Field(None, description="Generated slew script content.")
-    provenance: Optional[Dict[str, str]] = Field(None, description="Data source attribution: {skymap, catalog, event} with values live | replay | cached | synthetic | mock.")
+    provenance: Optional[Dict[str, str]] = Field(None, description="Data source attribution: {skymap, catalog, event} with values live | replay | cached | synthetic | point | mock.")
     visualizations: Optional[Dict[str, str]] = Field(None, description="Base64-encoded PNG plots keyed by plot name (Milestone 8).")
     observation_header: Optional[str] = Field(None, description="FITS observation header card text for scientific reproducibility (Milestone 9.1).")
 

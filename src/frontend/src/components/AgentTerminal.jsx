@@ -40,6 +40,9 @@ const TIER_CLASS = {
   live: 'text-green-400 border-green-500/40 bg-green-500/10',
   replay: 'text-amber-400 border-amber-500/40 bg-amber-500/10',
   cached: 'text-amber-400 border-amber-500/40 bg-amber-500/10',
+  // point = map built from the notice's own coordinates (real localization,
+  // no FITS download). Sky-tinted: honest data, distinct from live + mock.
+  point: 'text-sky-300 border-sky-500/40 bg-sky-500/10',
   synthetic: 'text-gray-400 border-white/15 bg-white/5',
   mock: 'text-gray-400 border-white/15 bg-white/5',
 }
@@ -98,7 +101,7 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
         <span className="w-3 h-3 rounded-full bg-yellow-500/80" />
         <span className="w-3 h-3 rounded-full bg-green-500/80" />
         <span className="ml-2 font-mono text-xs text-gray-300 tracking-wider">
-          kilonovascout — live telemetry
+          KiloNovaScout - Agent Observatory
         </span>
         <div className="ml-auto flex items-center gap-2">
           {runId && (

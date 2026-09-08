@@ -81,6 +81,21 @@ try:
 except (TypeError, ValueError):
     GRACEDB_POLL_MINUTES = 15.0
 
+async def _on_live_notice(payload) -> None:
+    """Single funnel for every auto-fired live trigger (Kafka + poller).
+
+    Runs the pipeline, then points _latest_run_id at the new run so the
+    dashboard's latest-event poll (and any human opening the page at 3am)
+    sees it without anyone pressing LAUNCH.  Agent/output globals resolve
+    at call time, so observatory recreations are always honored.
+    """
+    await kilonova_agent.handle_live_notice(payload)
+    global _latest_run_id
+    rid = kilonova_agent.agent_state.run_id
+    if rid:
+        _latest_run_id = rid
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the GCN listener (non-blocking; mock-only without creds).
@@ -90,7 +105,7 @@ async def lifespan(app: FastAPI):
     @app.on_event("startup")).
     """
     try:
-        listener = GcnListener(on_notice=kilonova_agent.handle_live_notice)
+        listener = GcnListener(on_notice=_on_live_notice)
         asyncio.ensure_future(listener._run())
         app.state.gcn_listener = listener
         logger.info("[startup] GCN listener scheduled (mock-only mode if no creds).")
@@ -105,7 +120,7 @@ async def lifespan(app: FastAPI):
             app.state.gracedb = state
             # Fresh handler lookup per trigger: observatory updates recreate
             # the agent, and the poller must never call a stale instance.
-            stopper = start_poller(lambda: kilonova_agent.handle_live_notice,
+            stopper = start_poller(_on_live_notice,
                                    loop, state, interval_min=GRACEDB_POLL_MINUTES,
                                    shared_seen=_live_fired,
                                    is_busy=lambda: kilonova_agent.is_busy())
@@ -201,14 +216,7 @@ async def _build_simulate_response(agent_output, run_id: str) -> dict:
         "neutrino": "High-Energy Neutrino Track",
     }.get(event_class, "Binary Neutron Star Merger")
 
-    status = {
-        "awaiting_approval": "target_acquired",
-        "weather_blocked": "monitoring",
-        "processing": "processing",
-        "error": "error",
-        "listening": "listening",
-        "rejected": "rejected",
-    }.get(kilonova_agent.agent_state.status, "processing")
+    status = _STATUS_MAP.get(kilonova_agent.agent_state.status, "processing")
 
     return {
         "alert": {
@@ -326,12 +334,12 @@ async def update_agent_config(config: ObservatoryConfig):
     # exclusivity instead of silently allowing a second concurrent run.
     kilonova_agent._run_lock = _previous_agent._run_lock
 
-    # The startup GCN listener captured the previous agent instance's bound
-    # handler — rebind it so live notices reach the reconfigured agent.
+    # The central live funnel resolves the agent fresh per call, so the
+    # rebind only needs to point at it (never at a bound agent method).
     try:
         listener = getattr(app.state, "gcn_listener", None)
         if listener is not None:
-            listener.on_notice = kilonova_agent.handle_live_notice
+            listener.on_notice = _on_live_notice
     except Exception as exc:
         logger.warning(f"[API] GCN listener rebind skipped ({exc})")
 
@@ -372,20 +380,28 @@ async def simulate_gcn_alert():
     return await _build_simulate_response(agent_output, _latest_run_id)
 
 
-async def _try_live_bns_trigger():
-    """One-shot live sky check behind the LAUNCH button (BNS only).
+# Frontend status vocabulary, shared by the legacy sync response and the
+# streaming run-record endpoint below.
+_STATUS_MAP = {
+    "awaiting_approval": "target_acquired",
+    "weather_blocked": "monitoring",
+    "processing": "processing",
+    "error": "error",
+    "listening": "listening",
+    "rejected": "rejected",
+    "skipped": "skipped",
+}
 
-    Polls public GraceDB for a significant superevent not yet fired; on a
-    hit, runs it through the full live pipeline and returns the response
-    dict.  Returns None (quiet sky) / str reason / "BUSY" so the caller falls
-    back to the mock packet.  Never raises otherwise; bounded at ~45s.
+
+async def _check_live_once():
+    """One-shot live sky check (BNS). Returns (payload|None, note|None, sid|None).
+
+    Failures fall open to mock with a reason string; never raises.
     """
-    if kilonova_agent.is_busy():
-        return "BUSY"
     try:
         from .gracedb_poller import FAR_PER_YEAR_HZ, build_live_payload, poll_once
     except Exception as exc:
-        return f"live check unavailable ({exc})"
+        return None, f"live check unavailable ({exc})", None
     try:
         payloads, _ = await asyncio.wait_for(
             asyncio.to_thread(poll_once, set(_live_fired), far_hz=FAR_PER_YEAR_HZ,
@@ -393,80 +409,178 @@ async def _try_live_bns_trigger():
             timeout=45.0,
         )
     except Exception as exc:
-        return f"live check failed ({exc}); using fallback simulation"
+        return None, f"live check failed ({exc}); using fallback simulation", None
     if not payloads:
-        return None
+        return None, None, None
     pick = payloads[0]
+    sid = pick["superevent_id"]
     try:
         live = await asyncio.to_thread(
-            build_live_payload, pick["voevent_xml"],
-            pick["superevent_id"], pick["skymap_url"])
+            build_live_payload, pick["voevent_xml"], sid, pick["skymap_url"])
     except Exception as exc:
-        return f"live trigger {pick['superevent_id']} unreadable ({exc}); using fallback simulation"
+        return None, f"live trigger {sid} unreadable ({exc}); using fallback simulation", None
     if live is None:
-        return f"live trigger {pick['superevent_id']} unparseable; using fallback simulation"
+        return None, f"live trigger {sid} unparseable; using fallback simulation", None
+    return live, (f"LIVE TRIGGER ACQUIRED: {sid} (FAR {pick.get('far')}) — "
+                  "running the real sky, not a replay."), sid
+
+
+async def _emit_live_check_row(run_id: str, event_class: str,
+                               live_note: str | None, duration_ms: int) -> None:
+    """Trace row proving the trigger decision in the white-box timeline.
+
+    Answers "did it even try live?" per run: the GraceDB verdict for BNS, or
+    an explicit skipped marker for classes with no live REST source.  Step 0
+    sibling of the "run" marker — the (step, tool) key never collides with it.
+    """
     try:
-        _live_fired.add(pick["superevent_id"])
-        agent_output = await kilonova_agent.process_gcn_event(live)
+        import datetime as _dt
+        if event_class == "bns":
+            summary = live_note or "quiet sky — no live trigger in window; fallback simulation"
+            status, detail = "completed", "GraceDB significant-superevent poll (6h lookback)"
+        else:
+            summary = f"no live REST source for {event_class}; demo simulation by design"
+            status, detail = "skipped", "n/a"
+        await run_registry.append_step(run_id, StepEvent(
+            run_id=run_id, step=0, tool_name="ingestion.live_check",
+            status=status, attempt=1,
+            started_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+            duration_ms=duration_ms, input_summary=detail,
+            output_summary=summary))
+    except Exception:
+        pass
+
+
+async def _background_run(run_id: str, event_class: str) -> None:
+    """Execute the full pipeline for a streaming LAUNCH (fire-and-forget).
+
+    Live-first for BNS via the one-shot GraceDB check; mock otherwise.
+    Every outcome — completed, failed, busy-declined, duplicate-skipped —
+    lands in the run record, which the UI follows via SSE plus
+    GET /api/runs/{run_id}.  Never raises.
+    """
+    try:
+        import datetime as _dt
+        record = await run_registry.get_record(run_id)
+        if record is None:
+            return
+        live_payload, live_note, sid = None, None, None
+        if event_class == "bns":
+            t0 = _dt.datetime.now(_dt.timezone.utc)
+            live_payload, live_note, sid = await _check_live_once()
+            dt_ms = int((_dt.datetime.now(_dt.timezone.utc) - t0).total_seconds() * 1000)
+            await _emit_live_check_row(run_id, event_class, live_note, dt_ms)
+        else:
+            await _emit_live_check_row(run_id, event_class, None, 0)
+        if live_note:
+            await run_registry.attach(run_id, event_update={"live_note": live_note})
+        if live_payload is not None:
+            _live_fired.add(sid)
+            output = await kilonova_agent.process_gcn_event(live_payload, run=record)
+            if (output.details or {}).get("busy") or (output.details or {}).get("duplicate"):
+                _live_fired.discard(sid)
+                if (output.details or {}).get("duplicate"):
+                    prior = (output.details or {}).get("run_id")
+                    await run_registry.attach(run_id, event_update={
+                        "live_note": f"live trigger {sid} already ran"
+                                     + (f" as {prior}" if prior else "")
+                                     + "; running fallback demo instead"})
+                    output = await kilonova_agent.run_mock_event(event_class, run=record)
+        else:
+            output = await kilonova_agent.run_mock_event(event_class, run=record)
+        rec = await run_registry.get_record(run_id)
+        if rec is not None and rec.status == "running":
+            # Agent declined (busy/duplicate/reject-before-DAG): close the
+            # record so the SSE stream terminates instead of hanging.
+            await run_registry.finish_run(run_id, "skipped", error=(output.message if output else "declined"))
     except Exception as exc:
-        logger.exception(f"[API] live trigger run crashed: {exc}")
-        raise HTTPException(status_code=500, detail=f"Live pipeline crashed: {exc}")
-    if (agent_output.details or {}).get("busy"):
-        # Another run (demo or poller-fired) holds the pipeline: release the
-        # id so a later check retries, then fall through to the mock path
-        # below (which will itself 429 if still contended).
-        _live_fired.discard(pick["superevent_id"])
-        return "BUSY"
-    if (agent_output.details or {}).get("duplicate"):
-        prior = (agent_output.details or {}).get("run_id")
-        return (f"live trigger {pick['superevent_id']} already ran"
-                + (f" as {prior}" if prior else "")
-                + "; running fallback demo instead")
-    global _latest_run_id
-    _latest_run_id = kilonova_agent.agent_state.run_id
-    resp = await _build_simulate_response(agent_output, _latest_run_id)
-    resp["live_trigger_found"] = True
-    resp["live_check_note"] = (
-        f"LIVE TRIGGER ACQUIRED: {pick['superevent_id']} "
-        f"(FAR {pick.get('far')}) — running the real sky, not a replay.")
-    return resp
+        logger.exception(f"[API] background run {run_id} crashed: {exc}")
+        try:
+            rec = await run_registry.get_record(run_id)
+            if rec is not None and rec.status == "running":
+                await run_registry.finish_run(run_id, "failed", error=str(exc))
+        except Exception:
+            pass
 
 
-@app.post("/api/simulate-event")
+def _step_to_dict(step) -> dict:
+    if hasattr(step, "model_dump"):
+        return step.model_dump()
+    if hasattr(step, "dict"):
+        return step.dict()
+    return {"tool_name": str(getattr(step, "tool_name", "?")),
+            "status": str(getattr(step, "status", "?"))}
+
+
+@app.post("/api/simulate-event", status_code=202)
 async def api_simulate_event(event_class: str = "bns"):
+    """Launch a run and return immediately with its id (streaming flow).
+
+    The pipeline executes in a background task; the UI subscribes to
+    /api/runs/{run_id}/events for live steps and fetches /api/runs/{run_id}
+    when the run-finished event arrives.  A contended pipeline answers 429
+    with the in-flight run id so the caller can attach to it instead.
+    """
     event_class = (event_class or "bns").lower()
     if event_class not in ALL_CLASSES:
         raise HTTPException(status_code=400, detail=f"Unknown event class '{event_class}'. Choose from {ALL_CLASSES}.")
-    # Live-first for mergers: check the real sky; only a quiet sky (or a
-    # failed check) falls back to the mock packet.  GRB/neutrino demo
-    # classes have no REST live source, so they always simulate.
-    if event_class == "bns":
-        live_resp = await _try_live_bns_trigger()
-        if isinstance(live_resp, dict):
-            return live_resp
-        live_note = live_resp  # None (quiet), str (reason), or "BUSY" -> mock below
-    else:
-        live_note = None
-    try:
-        agent_output = await kilonova_agent.run_mock_event(event_class)
-    except Exception as exc:
-        # Never drop the connection: surface pipeline crashes as JSON 500
-        # (a bare 502 from the proxy means the process itself died).
-        logger.exception(f"[API] simulate-event crashed: {exc}")
-        raise HTTPException(status_code=500, detail=f"Pipeline crashed: {exc}")
-    if (agent_output.details or {}).get("busy"):
+    if kilonova_agent.is_busy():
         raise HTTPException(
             status_code=429,
             detail={"message": "Pipeline busy — another run is in progress.",
-                    "run_id": (agent_output.details or {}).get("run_id")},
+                    "run_id": kilonova_agent.agent_state.run_id},
         )
+    record = await run_registry.create_run(
+        source="starting", event={"event_class": event_class, "note": "launch accepted"})
     global _latest_run_id
-    _latest_run_id = kilonova_agent.agent_state.run_id
-    resp = await _build_simulate_response(agent_output, _latest_run_id)
-    resp["live_trigger_found"] = False
-    if live_note:
-        resp["live_check_note"] = live_note
-    return resp
+    _latest_run_id = record.run_id
+    asyncio.create_task(_background_run(record.run_id, event_class))
+    return {"run_id": record.run_id, "status": "started"}
+
+
+@app.get("/api/runs/{run_id}")
+async def api_run_record(run_id: str):
+    """Full run state for the streaming UI (built from the record alone, so
+    it stays correct even after later runs move shared agent state)."""
+    record = await run_registry.get_record(run_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Run not found")
+    event = record.event or {}
+    prov = dict(record.provenance) if record.provenance else None
+    event_class = event.get("event_class") or "bns"
+    event_type = {
+        "bns": "Binary Neutron Star Merger",
+        "grb": "Gamma-Ray Burst",
+        "neutrino": "High-Energy Neutrino Track",
+    }.get(event_class, "Binary Neutron Star Merger")
+    if record.status == "failed":
+        status = "error"
+    else:
+        status = _STATUS_MAP.get(event.get("agent_status") or "", "processing")
+    weather = record.weather if isinstance(record.weather, dict) else {}
+    return {
+        "alert": {
+            "alert_id": event.get("trigger_id") or "GW170817",
+            "topic": event.get("topic") or "",
+            "event_type": event_type,
+            "ivorn": event.get("ivorn") or "GW170817",
+            "observatory": weather.get("observatory_name") or OBSERVATORY_NAME,
+            "source": record.source or "mock",
+            "event_class": event_class,
+            "class_label": METADATA.get(event_class, METADATA["bns"])["label"],
+            "gate_status": event.get("gate_status"),
+            "gate_reason": event.get("gate_reason"),
+        },
+        "status": status,
+        "candidates": record.candidates or [],
+        "execution_traces": [_step_to_dict(s) for s in (record.steps or [])],
+        "run_id": record.run_id,
+        "llm_rationale": record.llm_rationale or "",
+        "provenance": prov,
+        "visualizations": list((record.visualizations or {}).keys()),
+        "live_trigger_found": (record.source == "live"),
+        "live_check_note": event.get("live_note") or "",
+    }
 
 
 @app.post("/api/simulate-gcn-alert")

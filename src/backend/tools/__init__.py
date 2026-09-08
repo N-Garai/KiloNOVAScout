@@ -269,7 +269,10 @@ class KilonovaScoutTools:
         not a FITS skymap.  This constructs the equivalent 90%-credible
         HEALPix map (Gaussian falloff, normalized) so every downstream stage
         (catalog crossmatch, scoring, visualization, report) runs on the
-        identical code path as FITS triggers.  Provenance is ``synthetic``.
+        identical code path as FITS triggers.  Provenance is ``point`` (built
+        from the notice's own coordinates — real localization, not a FITS
+        download, and not the reconstructed GW fallback which keeps the name
+        ``synthetic``).
         """
         sigma = max(float(radius_deg or 1.0), 0.05)
         # Adaptive resolution: keep the 90% pixel count in the hundreds for
@@ -309,7 +312,7 @@ class KilonovaScoutTools:
             probdensity=[float(v) for v in sel_p],
             supercell_indices=[int(v) for v in sel_idx],
             localization_area_sq_deg=float(len(sel_idx) * pixel_area_deg2),
-            provenance_source="synthetic",
+            provenance_source="point",
             dist_mean=None,
             dist_std=None,
         )

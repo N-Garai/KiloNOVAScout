@@ -136,6 +136,7 @@ export default function ObservatorySection() {
 
   return (
     <section
+      id="observatory"
       ref={ref}
       className="relative min-h-screen py-24 px-6 overflow-hidden"
     >
