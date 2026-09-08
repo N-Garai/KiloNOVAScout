@@ -73,7 +73,7 @@ const STATUS = {
 // In-flow mission-log console: every backend step event rendered
 // chronologically — agent + tool, indented subagent retries, durations,
 // errors, and the live→fallback tier won by each data stage.
-export default function AgentTerminal({ traces = [], provenance = null, runId = '', source = 'mock', agentStatus = 'listening', loading = false }) {
+export default function AgentTerminal({ traces = [], provenance = null, runId = '', source = 'mock', agentStatus = 'listening', loading = false, eventClass = 'bns', classLabel = '' }) {
   const [expanded, setExpanded] = useState(null)
   const bottomRef = useRef(null)
 
@@ -105,10 +105,13 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
               {runId}
             </span>
           )}
+          <span className="font-mono text-[10px] px-2 py-0.5 rounded border border-cosmic-magenta/40 text-cosmic-magenta">
+            {(classLabel || eventClass || 'bns').toUpperCase()}
+          </span>
           <span className={`font-mono text-[10px] px-2 py-0.5 rounded border ${
             source === 'live' ? 'border-green-400/40 text-green-400' : 'border-white/10 text-gray-400'
           }`}>
-            {source === 'live' ? '● LIVE GCN' : 'MOCK GW170817'}
+            {source === 'live' ? '● LIVE GCN' : 'MOCK REPLAY'}
           </span>
           <span className={`font-mono text-[10px] px-2 py-0.5 rounded border ${
             agentStatus === 'target_acquired' ? 'border-green-400/40 text-green-400' :

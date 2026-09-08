@@ -139,6 +139,7 @@ class ObservatoryConfig(BaseModel):
     lat: float = Field(default=33.356, description="Latitude in decimal degrees.")
     lon: float = Field(default=-116.865, description="Longitude in decimal degrees.")
     alt: float = Field(default=1706, description="Altitude in meters.")
+    alert_classes: Optional[List[str]] = Field(default=None, description="Enabled live-watch event classes (bns, grb, neutrino).")
 
 # --- Scoring Weights ---
 class ScoringWeights(BaseModel):

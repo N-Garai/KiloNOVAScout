@@ -17,7 +17,7 @@ import os
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import List, Optional
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +34,7 @@ from .models import (
     RunRecord,
     StepEvent,
 )
+from .event_classes import ALL_CLASSES, METADATA, enabled_classes, topics_for
 from .tools import KilonovaScoutTools
 from .simulator.event_simulator import EventSimulator
 from .run_registry import build_report_markdown
@@ -123,6 +124,10 @@ kilonova_agent = KilonovaScoutAgent(
 event_simulator = EventSimulator()
 _latest_run_id: Optional[str] = None
 
+# Live-watch event classes (bns, grb, neutrino).  Overridable via the
+# ALERT_CLASSES env var and at runtime through PUT /agent/config.
+ALERT_CLASSES: List[str] = enabled_classes()
+
 
 def _galaxy_to_dict(g) -> dict:
     # NOTE: getattr defaults do NOT cover fields that exist but are None,
@@ -149,6 +154,17 @@ async def _build_simulate_response(agent_output, run_id: str) -> dict:
     details = agent_output.details if agent_output.details else {}
     galaxies_raw = kilonova_agent.agent_state.candidate_galaxies or []
     galaxies = [_galaxy_to_dict(g) for g in galaxies_raw]
+    try:
+        record = await run_registry.get_record(run_id)
+        run_event = (record.event or {}) if record else {}
+    except Exception:
+        run_event = {}
+    event_class = run_event.get("event_class") or "bns"
+    event_type = {
+        "bns": "Binary Neutron Star Merger",
+        "grb": "Gamma-Ray Burst",
+        "neutrino": "High-Energy Neutrino Track",
+    }.get(event_class, "Binary Neutron Star Merger")
 
     status = {
         "awaiting_approval": "target_acquired",
@@ -161,13 +177,17 @@ async def _build_simulate_response(agent_output, run_id: str) -> dict:
 
     return {
         "alert": {
-            "alert_id": details.get("targets") and "GW170817-A" or "GW170817",
-            "event_type": "Binary Neutron Star Merger",
+            "alert_id": run_event.get("trigger_id") or (details.get("targets") and "GW170817-A" or "GW170817"),
+            "event_type": event_type,
             "ivorn": kilonova_agent.agent_state.last_gcn_event or "GW170817",
             "distance_mpc": 40.8,
             "confidence": 90.0,
             "observatory": kilonova_agent.agent_state.observatory_weather.observatory_name if kilonova_agent.agent_state.observatory_weather else OBSERVATORY_NAME,
             "source": kilonova_agent.agent_state.source or "mock",
+            "event_class": event_class,
+            "class_label": METADATA.get(event_class, METADATA["bns"])["label"],
+            "gate_status": run_event.get("gate_status"),
+            "gate_reason": run_event.get("gate_reason"),
         },
         "status": status,
         "candidates": galaxies,
@@ -204,6 +224,16 @@ async def _run_visualizations(run_id: Optional[str]) -> Optional[dict]:
     return dict(record.visualizations) if record and record.visualizations else None
 
 
+@app.get("/api/event-classes")
+async def api_event_classes():
+    """Supported trigger families + which are live-watched (for the UI)."""
+    return {
+        "classes": [METADATA[k] for k in ALL_CLASSES],
+        "enabled": list(ALERT_CLASSES),
+        "topics": topics_for(ALERT_CLASSES),
+    }
+
+
 @app.get("/agent/config")
 async def get_agent_config():
     return ObservatoryConfig(
@@ -211,12 +241,13 @@ async def get_agent_config():
         lat=OBSERVATORY_LAT,
         lon=OBSERVATORY_LON,
         alt=OBSERVATORY_ALT,
+        alert_classes=list(ALERT_CLASSES),
     )
 
 
 @app.put("/agent/config")
 async def update_agent_config(config: ObservatoryConfig):
-    global kilonova_tools, kilonova_agent, OBSERVATORY_NAME, OBSERVATORY_LAT, OBSERVATORY_LON, OBSERVATORY_ALT
+    global kilonova_tools, kilonova_agent, OBSERVATORY_NAME, OBSERVATORY_LAT, OBSERVATORY_LON, OBSERVATORY_ALT, ALERT_CLASSES
 
     new_name = config.name if config.name and config.name.strip() else "Palomar"
     new_lat = config.lat if config.lat is not None else 33.356
@@ -230,6 +261,18 @@ async def update_agent_config(config: ObservatoryConfig):
     OBSERVATORY_LAT = new_lat
     OBSERVATORY_LON = new_lon
     OBSERVATORY_ALT = new_alt
+
+    if config.alert_classes is not None:
+        cleaned = [c.strip().lower() for c in config.alert_classes if c and c.strip().lower() in ALL_CLASSES]
+        if cleaned:
+            ALERT_CLASSES = cleaned
+            try:
+                listener = getattr(app.state, "gcn_listener", None)
+                if listener is not None:
+                    listener.update_topics(topics_for(ALERT_CLASSES))
+            except Exception as exc:
+                logger.warning(f"[API] listener resubscribe skipped ({exc})")
+            logger.info(f"[API] Alert classes updated: {ALERT_CLASSES}")
 
     kilonova_tools = KilonovaScoutTools(
         observatory_name=OBSERVATORY_NAME,
@@ -258,6 +301,7 @@ async def update_agent_config(config: ObservatoryConfig):
         lat=OBSERVATORY_LAT,
         lon=OBSERVATORY_LON,
         alt=OBSERVATORY_ALT,
+        alert_classes=list(ALERT_CLASSES),
     )
 
 
@@ -289,9 +333,12 @@ async def simulate_gcn_alert():
 
 
 @app.post("/api/simulate-event")
-async def api_simulate_event():
+async def api_simulate_event(event_class: str = "bns"):
+    event_class = (event_class or "bns").lower()
+    if event_class not in ALL_CLASSES:
+        raise HTTPException(status_code=400, detail=f"Unknown event class '{event_class}'. Choose from {ALL_CLASSES}.")
     try:
-        agent_output = await kilonova_agent.run_mock_event()
+        agent_output = await kilonova_agent.run_mock_event(event_class)
     except Exception as exc:
         # Never drop the connection: surface pipeline crashes as JSON 500
         # (a bare 502 from the proxy means the process itself died).

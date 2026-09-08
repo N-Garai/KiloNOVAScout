@@ -156,20 +156,28 @@ def lunar_penalty(target_ra: float, target_dec: float) -> Dict[str, float]:
 
 
 def compute_full_score(terms_dict: Dict[str, float], weights: Dict[str, float]) -> float:
-    """Full v3 composite scoring formula.
+    """Full v3 composite scoring formula, extended for multi-event classes.
 
-    score = alpha*P + beta*Schechter - gamma*X - delta*C + epsilon*B + zeta*SNR - eta*L_moon
+    score = alpha*P + beta*Schechter - gamma*X - delta*C + epsilon*B
+            + zeta*SNR - eta*L_moon + theta*F + kappa*s
+
+    The two extra terms are optional and default to 0, so every existing
+    v3 call is unaffected:
+
+    * ``F`` (``theta``) — GRB brightness proxy from notice energetics.
+    * ``s`` (``kappa``) — neutrino signalness (astrophysical probability).
 
     Parameters
     ----------
     terms_dict : dict
         Raw (unweighted) term values with keys:
         ``"spatial"``, ``"schechter"``, ``"airmass"``, ``"cloud"``,
-        ``"grb_boost"``, ``"snr"``, ``"lunar"``.
+        ``"grb_boost"``, ``"snr"``, ``"lunar"``, ``"flux"``,
+        ``"signalness"``.
     weights : dict
         Weight coefficients with keys:
         ``"alpha"``, ``"beta"``, ``"gamma"``, ``"delta"``,
-        ``"epsilon"``, ``"zeta"``, ``"eta"``.
+        ``"epsilon"``, ``"zeta"``, ``"eta"``, ``"theta"``, ``"kappa"``.
         Missing keys default to 0.
 
     Returns
@@ -184,6 +192,8 @@ def compute_full_score(terms_dict: Dict[str, float], weights: Dict[str, float]) 
     epsilon = weights.get("epsilon", 3.0)
     zeta = weights.get("zeta", 0.1)
     eta = weights.get("eta", 0.4)
+    theta = weights.get("theta", 0.0)
+    kappa = weights.get("kappa", 0.0)
 
     score = (
         alpha * terms_dict.get("spatial", 0.0)
@@ -193,5 +203,7 @@ def compute_full_score(terms_dict: Dict[str, float], weights: Dict[str, float]) 
         + epsilon * terms_dict.get("grb_boost", 0.0)
         + zeta * terms_dict.get("snr", 0.0)
         - eta * terms_dict.get("lunar", 0.0)
+        + theta * terms_dict.get("flux", 0.0)
+        + kappa * terms_dict.get("signalness", 0.0)
     )
     return round(score, 6)

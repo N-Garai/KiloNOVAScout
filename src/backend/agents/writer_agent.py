@@ -20,6 +20,8 @@ import html as _html
 import json
 from typing import Any, Dict, List, Optional
 
+from ..event_classes import METADATA, get_profile
+
 
 def _fmt(value: Any, nd: int = 4, default: str = "—") -> str:
     try:
@@ -35,8 +37,15 @@ def _sci(value: Any, nd: int = 3, default: str = "—") -> str:
         return default
 
 
-def _candidate_trace_markdown(candidate: Dict[str, Any]) -> List[str]:
-    """Step-by-step calculation trace for one candidate (PRD 6.4.2)."""
+def _candidate_trace_markdown(candidate: Dict[str, Any], event_class: str = "bns") -> List[str]:
+    """Step-by-step calculation trace for one candidate (PRD 6.4.2).
+
+    Only the active class terms are rendered — measurements a class does
+    not need (e.g. host mass for GRBs) are listed once as skipped, so the
+    trace stays an honest audit of what actually ran.
+    """
+    profile = get_profile(event_class)
+    active = set(profile.get("active_terms", []))
     lines: List[str] = []
     bd = candidate.get("score_breakdown") or {}
     terms = bd.get("terms", {}) or {}
@@ -46,38 +55,55 @@ def _candidate_trace_markdown(candidate: Dict[str, Any]) -> List[str]:
 
     lines.append(f"#### Calculation Trace: {name}")
     lines.append("")
-    lines.append("1. **Spatial containment:** "
+    steps: List[str] = []
+    steps.append("**Spatial containment:** "
                  f"P_overlap = {_fmt(terms.get('spatial'))} "
-                 "(skymap probability density at the galaxy's HEALPix pixel, "
+                 "(localization probability density at the candidate pixel, "
                  "integrated over a 1 deg² follow-up field of view)")
-    lines.append("2. **Schechter weight:** "
-                 f"w = (L_K/L_★)^α · e^(−L_K/L_★) with "
-                 f"L_K = {_sci(candidate.get('luminosity_k'))} L_☉, "
-                 f"L_★ = {_sci(weights.get('schechter_l_star'))} L_☉, "
-                 f"α = {_fmt(weights.get('schechter_alpha'), 1)} "
-                 f"→ w = {_fmt(terms.get('schechter'))}")
-    lines.append("3. **Airmass (windowed):** "
+    if "schechter" in active:
+        steps.append("**Schechter weight:** "
+                     f"w = (L_K/L_★)^α · e^(−L_K/L_★) with "
+                     f"L_K = {_sci(candidate.get('luminosity_k'))} L_☉, "
+                     f"L_★ = {_sci(weights.get('schechter_l_star'))} L_☉, "
+                     f"α = {_fmt(weights.get('schechter_alpha'), 1)} "
+                     f"→ w = {_fmt(terms.get('schechter'))}")
+    steps.append("**Airmass (windowed):** "
                  f"X̄ = (1/N)·Σ sec(z_k) over a 2-hour, 12-sample window "
                  f"→ X̄ = {_fmt(terms.get('airmass'), 3)}")
-    lines.append("4. **Atmospheric extinction:** "
+    steps.append("**Atmospheric extinction:** "
                  f"Δm = k·X̄ with k = {_fmt(weights.get('zenith_extinction'), 2)} mag/airmass "
                  f"→ Δm = {_fmt(obs.get('extinction_mag'))} mag")
-    lines.append("5. **Cloud penalty:** "
+    steps.append("**Cloud penalty:** "
                  f"C = {_fmt(terms.get('cloud'), 3)} (fractional, from Open-Meteo)")
-    lines.append("6. **GRB boost:** "
-                 f"B_GRB = {_fmt(terms.get('grb_boost'), 1)} "
-                 "(3.0 when multi-messenger coincidence confirmed, else 0)")
-    lines.append("7. **SNR proxy:** "
-                 f"m = {_fmt(obs.get('apparent_mag'), 2)} at d_L → "
-                 f"SNR = {_fmt(terms.get('snr'), 3)} "
-                 "(10·10^(0.4·(17 − m)); 1-m telescope, 300 s)")
-    lines.append("8. **Lunar penalty:** "
+    if "grb_boost" in active:
+        steps.append("**GRB boost:** "
+                     f"B_GRB = {_fmt(terms.get('grb_boost'), 1)} "
+                     "(3.0 when multi-messenger coincidence confirmed, else 0)")
+    if "snr" in active:
+        steps.append("**SNR proxy:** "
+                     f"m = {_fmt(obs.get('apparent_mag'), 2)} at d_L → "
+                     f"SNR = {_fmt(terms.get('snr'), 3)} "
+                     "(10·10^(0.4·(17 − m)); 1-m telescope, 300 s)")
+    if "flux" in active:
+        steps.append("**Burst flux proxy:** "
+                     f"F = {_fmt(terms.get('flux'), 3)} "
+                     "(log-scaled notice fluence/peak-flux; 1.0 at 1e-6 erg/cm²)")
+    if "signalness" in active:
+        steps.append("**Neutrino signalness:** "
+                     f"s = {_fmt(terms.get('signalness'), 3)} "
+                     "(astrophysical probability from the IceCube notice)")
+    steps.append("**Lunar penalty:** "
                  f"Moon separation = {_fmt(obs.get('moon_separation_deg'), 2)}° "
                  f"→ L_moon = {_fmt(terms.get('lunar'), 3)} "
                  "(0 above 30°, 1 below 10°, linear between)")
-    lines.append("9. **Final score:** "
-                 f"S = α·P + β·w − γ·X − δ·C + ε·B + ζ·SNR − η·L = "
+    skipped = [t for t in ("schechter", "grb_boost", "snr", "flux", "signalness") if t not in active]
+    if skipped:
+        steps.append(f"**Skipped for this event class:** {', '.join(skipped)} "
+                     "(weight 0 — measurement not applicable)")
+    steps.append(f"**Final score:** {profile.get('formula', 'S')} = "
                  f"**{_fmt(bd.get('total'))}**")
+    for i, step in enumerate(steps, start=1):
+        lines.append(f"{i}. {step}")
     lines.append("")
     return lines
 
@@ -105,11 +131,28 @@ def _skymap_stats(record) -> Dict[str, Any]:
     return stats or {}
 
 
+def _classification_lines(event: Dict[str, Any]) -> List[str]:
+    """Trigger-classification section shared by all report formats."""
+    event_class = event.get("event_class") or "bns"
+    profile = get_profile(event_class)
+    label = METADATA.get(event_class, METADATA["bns"])["label"]
+    return [
+        f"**Event class:** `{label}` (`{event_class}`)",
+        f"**Ingest verdict:** `{event.get('gate_status', 'unknown')}` — "
+        f"{event.get('gate_reason', 'no gate record')} "
+        f"(confidence {event.get('gate_confidence', '—')}, subclass `{event.get('gate_subclass', '—')}`)",
+        f"**Ranking strategy:** {profile.get('strategy', '')}",
+        f"**Scoring formula:** `{profile.get('formula', '')}`",
+    ]
+
+
 def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) -> str:
     """Full v3 Markdown report with provenance and calculation traces."""
     event = record.event or {}
     prov = record.provenance or {}
     sky = _skymap_stats(record)
+    event_class = event.get("event_class") or "bns"
+    profile = get_profile(event_class)
     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     lines: List[str] = []
@@ -167,14 +210,16 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
             f"| `{cand.get('catalog_source', 'unknown')}` |"
         )
     lines.append("")
+    lines.append("## Trigger Classification")
+    lines.append("")
+    lines.extend(f"- {line}" for line in _classification_lines(event))
+    lines.append("")
     lines.append("### Scoring Formula")
     lines.append("")
-    lines.append("$$S_i = \\alpha \\cdot P_{\\text{overlap},i} + \\beta \\cdot w_{\\text{Schechter},i}"
-                 " - \\gamma \\cdot \\bar{X}_i - \\delta \\cdot C + \\epsilon \\cdot B_{\\text{GRB}}"
-                 " + \\zeta \\cdot \\text{SNR}_i - \\eta \\cdot L_{\\text{moon},i}$$")
+    lines.append(f"$${profile.get('formula_tex', profile.get('formula', ''))}$$")
     lines.append("")
     for cand in record.candidates:
-        lines.extend(_candidate_trace_markdown(cand))
+        lines.extend(_candidate_trace_markdown(cand, event_class))
 
     weather = record.weather
     if weather:
@@ -422,6 +467,12 @@ def build_report_latex(record, weights: Optional[Dict[str, float]] = None) -> st
     tex.append(r"  \item Time: \texttt{" + _tex_escape(event.get("event_time", "unknown")) + "}")
     tex.append(r"  \item Data provenance: skymap=\texttt{" + _tex_escape(prov.get("skymap", "unknown")) +
                r"}, catalog=\texttt{" + _tex_escape(prov.get("catalog", "unknown")) + "}")
+    _ev_class = event.get("event_class") or "bns"
+    _prof = get_profile(_ev_class)
+    _label = METADATA.get(_ev_class, METADATA["bns"])["label"]
+    tex.append(r"  \item Event class: \texttt{" + _tex_escape(_label) + "} (\texttt{" + _tex_escape(_ev_class) + "})")
+    tex.append(r"  \item Ingest verdict: \texttt{" + _tex_escape(event.get("gate_status", "unknown")) + "} --- " +
+               _tex_escape(event.get("gate_reason", "no gate record")))
     _live = (prov.get("event", record.source) or record.source) == "live"
     if _live:
         tex.append(r"  \item Live trigger: this run processed a real notice from the NASA GCN stream.")
@@ -464,13 +515,8 @@ def build_report_latex(record, weights: Optional[Dict[str, float]] = None) -> st
     tex.append(r"\caption{Ranked host galaxy candidates with composite prioritization scores.}")
     tex.append(r"\end{table}")
     tex.append(r"\subsection{Scoring Formula}")
-    tex.append(r"\begin{equation}\begin{aligned}"
-               r" S_i ={}& \alpha \cdot P_{\text{overlap},i}"
-               r" + \beta \cdot w_{\text{Schechter},i}"
-               r" - \gamma \cdot \bar{X}_i - \delta \cdot C"
-               r" + \epsilon \cdot B_{\text{GRB}}"
-               r" + \zeta \cdot \text{SNR}_i - \eta \cdot L_{\text{moon},i}"
-               r" \end{aligned}\end{equation}")
+    tex.append(r"\begin{equation}" + _prof.get("formula_tex", "") + r"\end{equation}")
+    _active = set(_prof.get("active_terms", []))
     for cand in record.candidates:
         bd = cand.get("score_breakdown") or {}
         terms = bd.get("terms", {}) or {}
@@ -478,11 +524,18 @@ def build_report_latex(record, weights: Optional[Dict[str, float]] = None) -> st
         tex.append(r"\subsection*{Calculation Trace: " + name + "}")
         tex.append(r"\begin{enumerate}")
         tex.append(r"  \item Spatial: $P_{\text{overlap}} = " + f"{float(terms.get('spatial', 0)):.4f}$")
-        tex.append(r"  \item Schechter: $w = " + f"{float(terms.get('schechter', 0)):.4f}$")
+        if "schechter" in _active:
+            tex.append(r"  \item Schechter: $w = " + f"{float(terms.get('schechter', 0)):.4f}$")
         tex.append(r"  \item Airmass: $\bar{{X}} = " + f"{float(terms.get('airmass', 0)):.3f}$")
         tex.append(r"  \item Cloud: $C = " + f"{float(terms.get('cloud', 0)):.3f}$")
-        tex.append(r"  \item GRB boost: $B = " + f"{float(terms.get('grb_boost', 0)):.1f}$")
-        tex.append(r"  \item SNR proxy: $\text{{SNR}} = " + f"{float(terms.get('snr', 0)):.4f}$")
+        if "grb_boost" in _active:
+            tex.append(r"  \item GRB boost: $B = " + f"{float(terms.get('grb_boost', 0)):.1f}$")
+        if "snr" in _active:
+            tex.append(r"  \item SNR proxy: $\text{{SNR}} = " + f"{float(terms.get('snr', 0)):.4f}$")
+        if "flux" in _active:
+            tex.append(r"  \item Burst flux: $F = " + f"{float(terms.get('flux', 0)):.4f}$")
+        if "signalness" in _active:
+            tex.append(r"  \item Signalness: $s = " + f"{float(terms.get('signalness', 0)):.4f}$")
         tex.append(r"  \item Lunar: $L = " + f"{float(terms.get('lunar', 0)):.3f}$")
         tex.append(r"  \item Final: $S = " + f"{float(bd.get('total', 0)):.4f}$")
         tex.append(r"\end{enumerate}")

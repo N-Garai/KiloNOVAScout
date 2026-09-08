@@ -19,6 +19,18 @@ Built with [Strands Agents SDK](https://github.com/strands-agents/sdk-python) an
 - **Tool-call audit logging** — Strands `AfterToolCallEvent` hook for observability.
 - **Scroll-triggered architecture panel** — Real-time agent dispatch log fetched from `/api/latest-event`.
 
+### Multi-event classes (current)
+
+Beyond neutron-star mergers, the agent triages three cosmic trigger families end-to-end — each with its own Kafka topics, ingest gate, scoring profile, and report section:
+
+| Class | Notices | Gate | Ranking math |
+|-------|---------|------|--------------|
+| Neutron-star merger | LVC INITIAL/PRELIMINARY/UPDATE | HasNS / BNS+NSBH component, FAR < 1/yr | Full 7-term formula incl. Schechter host mass |
+| Gamma-ray burst | Fermi-GBM Alert/Fin-Pos, Swift-BAT | T90 duration + fluence/peak-flux triage | Host/SNR terms off; burst-flux proxy (θ) drives priority; point-localized HEALPix built from RA/Dec + error radius |
+| High-energy neutrino | IceCube Gold/Bronze tracks | Signalness tiers (gold ≥ 0.5, bronze ≥ 0.3) | Containment + signalness (κ) over degree-scale region; tiling guidance in report |
+
+Users choose what to be alerted on two ways: **Live watch** toggles in the demo section (persisted to backend config, listener resubscribes without restart) and a **demo trigger-class picker** (`POST /api/simulate-event?event_class=grb`). `GET /api/event-classes` lists families, enablement, and subscribed topics.
+
 ### v2
 
 - DAG-style orchestration (ingest → skymap → catalog‖weather → GRB validation → scheduler → LLM rationale → human approval)
@@ -129,6 +141,7 @@ docker run -p 8000:8000 kilonovascout
 | `OBSERVATORY_LAT` | No | `33.356` | Observatory latitude (degrees) |
 | `OBSERVATORY_LON` | No | `-116.865` | Observatory longitude (degrees) |
 | `OBSERVATORY_ALT` | No | `1706` | Observatory altitude (meters) |
+| `ALERT_CLASSES` | No | `bns,grb,neutrino` | Live-watch event classes (comma-separated; also changeable in UI) |
 | `PORT` | Do not set | `8000` | Render injects this automatically |
 
 **No keys needed for:** VizieR TAP (anonymous), Open-Meteo (keyless), bundled replay data (in repo), matplotlib (local Agg backend).

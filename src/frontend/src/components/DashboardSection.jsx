@@ -17,6 +17,10 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const [showReport, setShowReport] = useState(false)
   const [runError, setRunError] = useState('')
   const [wakingBackend, setWakingBackend] = useState(false)
+  const [eventClasses, setEventClasses] = useState([])
+  const [enabledClasses, setEnabledClasses] = useState(['bns'])
+  const [simClass, setSimClass] = useState('bns')
+  const [watchSaving, setWatchSaving] = useState(false)
   const esRef = useRef(null)
   const wakeTimerRef = useRef(null)
 
@@ -27,6 +31,39 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
     }
   }, [])
+
+  // Load supported trigger families + live-watch selection once.
+  useEffect(() => {
+    axios.get('/api/event-classes')
+      .then(({ data }) => {
+        if (Array.isArray(data.classes) && data.classes.length) setEventClasses(data.classes)
+        if (Array.isArray(data.enabled) && data.enabled.length) {
+          setEnabledClasses(data.enabled)
+          if (!data.enabled.includes(simClass)) setSimClass(data.enabled[0])
+        }
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const toggleWatchClass = async (key) => {
+    const next = enabledClasses.includes(key)
+      ? enabledClasses.filter((k) => k !== key)
+      : [...enabledClasses, key]
+    if (next.length === 0) return // at least one family must stay watched
+    setWatchSaving(true)
+    try {
+      const { data: cfg } = await axios.get('/agent/config')
+      const { data: updated } = await axios.put('/agent/config', { ...cfg, alert_classes: next })
+      setEnabledClasses(updated.alert_classes || next)
+      if (!next.includes(simClass)) setSimClass(next[0])
+    } catch (err) {
+      console.error('Watch toggle failed:', err)
+      setRunError('Could not update live-watch selection. The backend may be asleep — retry shortly.')
+    } finally {
+      setWatchSaving(false)
+    }
+  }
 
   const simulateEvent = async () => {
     setLoading(true)
@@ -45,7 +82,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     // Render's proxy kills requests when the free instance restarts
     // mid-run (HTTP 502/503/504). Retry once automatically — the second
     // attempt usually lands on the freshly woken instance.
-    const postLaunch = (ms) => axios.post('/api/simulate-event', null, { timeout: ms })
+    const postLaunch = (ms) => axios.post(`/api/simulate-event?event_class=${encodeURIComponent(simClass)}`, null, { timeout: ms })
     let response = null
     let lastError = null
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -257,9 +294,58 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             LIVE DEMO
           </h2>
           <p className="font-grotesk text-xl text-gray-400 max-w-3xl mx-auto mb-8">
-            Listening to the live NASA GCN stream — triage fires on the latest gravitational-wave trigger.
-            When the sky is quiet, the agent replays the archived GW170817 merger as a fallback simulation.
+            Listening to the live NASA GCN stream — triage fires on the latest trigger across every watched family.
+            When the sky is quiet, the agent replays an archived event as a fallback simulation.
           </p>
+
+          {/* Demo trigger-class picker */}
+          <div className="mb-5">
+            <div className="font-mono text-[10px] text-gray-500 uppercase tracking-widest mb-2">Demo trigger class</div>
+            <div className="flex flex-wrap justify-center gap-2">
+              {(eventClasses.length ? eventClasses : [{ key: 'bns', label: 'Neutron-star merger' }]).map((c) => (
+                <button
+                  key={c.key}
+                  onClick={() => setSimClass(c.key)}
+                  disabled={loading}
+                  title={c.blurb || c.label}
+                  className={`px-4 py-2 rounded-lg font-mono text-xs border transition-all disabled:opacity-50 ${
+                    simClass === c.key
+                      ? 'border-cosmic-cyan/60 bg-cosmic-cyan/10 text-cosmic-cyan'
+                      : 'border-white/10 text-gray-400 hover:border-white/30 hover:text-gray-200'
+                  }`}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Live-watch toggles (persisted to backend config) */}
+          <div className="mb-8">
+            <div className="font-mono text-[10px] text-gray-500 uppercase tracking-widest mb-2">
+              Live watch {watchSaving && <span className="text-yellow-400">· saving…</span>}
+            </div>
+            <div className="flex flex-wrap justify-center gap-2">
+              {(eventClasses.length ? eventClasses : [{ key: 'bns', label: 'Neutron-star merger' }]).map((c) => {
+                const on = enabledClasses.includes(c.key)
+                return (
+                  <button
+                    key={c.key}
+                    onClick={() => toggleWatchClass(c.key)}
+                    disabled={loading || watchSaving}
+                    title={on ? `Watching ${c.label} — click to mute` : `Muted — click to watch ${c.label}`}
+                    className={`px-4 py-2 rounded-lg font-mono text-xs border transition-all disabled:opacity-50 ${
+                      on
+                        ? 'border-green-400/50 bg-green-500/10 text-green-300'
+                        : 'border-white/10 text-gray-600 hover:border-white/25'
+                    }`}
+                  >
+                    {on ? '● ' : '○ '}{c.label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
 
           <button
             onClick={simulateEvent}
@@ -308,7 +394,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
               <span className={`text-[10px] font-mono px-2 py-1 rounded border ${
                 source === 'live' ? 'border-green-400/40 text-green-400' : 'border-white/10 text-gray-300'
               }`}>
-                {source === 'live' ? '● LIVE GCN' : 'MOCK GW170817'}
+                {source === 'live' ? '● LIVE GCN' : `MOCK ${(alertData?.class_label || 'GW170817').toUpperCase()}`}
               </span>
               <div className={`w-4 h-4 rounded-full ${
                 agentStatus === 'listening' ? 'bg-gray-400' :
@@ -342,6 +428,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           source={source}
           agentStatus={agentStatus}
           loading={loading}
+          eventClass={alertData?.event_class || simClass}
+          classLabel={alertData?.class_label || ''}
         />
 
         {/* Alert data */}
@@ -369,6 +457,12 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                 <span className="text-gray-400">Observatory:</span>{' '}
                 <span className="text-white">{alertData.observatory}</span>
               </div>
+              {alertData.gate_reason && (
+                <div className="md:col-span-2 mt-1">
+                  <span className="text-gray-400">Triage [{alertData.gate_status || 'UNKNOWN'}]:</span>{' '}
+                  <span className="text-white">{alertData.gate_reason}</span>
+                </div>
+              )}
             </div>
             {provenance && (
               <div className="mt-4 pt-3 border-t border-white/10 flex flex-wrap gap-2">

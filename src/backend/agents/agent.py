@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import gc
 import json
 import os
 import time
@@ -39,6 +40,7 @@ from ..models import (
     TelescopeSlewScript,
     Voevent,
 )
+from ..event_classes import METADATA, evaluate_trigger, get_profile, harvest_params
 from ..run_registry import RunRegistry, normalize_priorities
 from ..tools import KilonovaScoutTools
 from ..simulator.event_simulator import EventSimulator
@@ -52,6 +54,20 @@ run_registry = RunRegistry()
 
 def _now_iso() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
+
+
+def _log_mem(run_id: str, stage: str) -> None:
+    """Log peak RSS at pipeline milestones (OOM diagnosis on 512 MB tiers).
+
+    Uses stdlib ``resource`` (Linux-only); silently no-ops elsewhere so
+    local Windows dev is unaffected.
+    """
+    try:
+        import resource
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+        print(f"[MEM] run={run_id} stage={stage} peak_rss={rss_mb:.0f}MB")
+    except Exception:
+        pass
 
 
 class _ToolAuditHook:
@@ -153,15 +169,47 @@ def _weather_to_dict(w: ObservatoryWeather) -> Dict[str, Any]:
 
 
 def _serialize_event(voevent: Voevent) -> Dict[str, Any]:
+    ww = voevent.wherewhen or {}
+    event_class = ww.get("event_class") or "bns"
     return {
         "ivorn": voevent.ivorn,
         "role": voevent.role,
         "description": voevent.description,
-        "event_time": (voevent.wherewhen or {}).get("event_time"),
-        "distance_mpc": (voevent.wherewhen or {}).get("distance_mpc"),
-        "confidence": (voevent.wherewhen or {}).get("confidence"),
-        "skymap_summary": (voevent.wherewhen or {}).get("skymap_summary"),
+        "event_time": ww.get("event_time"),
+        "trigger_id": ww.get("trigger_id"),
+        "distance_mpc": ww.get("distance_mpc"),
+        "confidence": ww.get("confidence"),
+        "skymap_summary": ww.get("skymap_summary"),
+        "event_class": event_class,
+        "class_label": METADATA.get(event_class, METADATA["bns"])["label"],
+        # Gate verdict fields are attached after ingest (see _run_dag).
+        "gate_status": None,
+        "gate_reason": None,
+        "gate_confidence": None,
+        "gate_subclass": None,
     }
+
+
+def _classify_trigger(payload: GcnKafkaPayload) -> Dict[str, Any]:
+    """Run the event-class ingest gate over a trigger payload.
+
+    Merges the class verdict (ACCEPTED/REJECTED + reason + confidence)
+    into the legacy verdict dict so both live and replay notices flow
+    through the same triage.
+    """
+    ww = payload.voevent.wherewhen or {}
+    event_class = ww.get("event_class") or "bns"
+    gate = evaluate_trigger(event_class, payload.voevent.what)
+    base = _mock_verdict(payload)
+    base.update({
+        "event_class": gate["class_key"],
+        "class_label": METADATA.get(gate["class_key"], METADATA["bns"])["label"],
+        "status": gate["status"],
+        "gate_reason": gate["reason"],
+        "gate_confidence": gate["confidence"],
+        "gate_subclass": gate["subclass"],
+    })
+    return base
 
 
 class KilonovaScoutAgent(Agent):
@@ -245,9 +293,9 @@ class KilonovaScoutAgent(Agent):
             return AgentOutput(message="Slew initiated.", action_status="success")
         return AgentOutput(message="No pending script.", action_status="failure")
 
-    async def run_mock_event(self) -> AgentOutput:
-        """Reproducible GW170817 mock run."""
-        payload = self.simulator.get_mock_gw170817_payload()
+    async def run_mock_event(self, event_class: str = "bns") -> AgentOutput:
+        """Reproducible mock run for any supported event class."""
+        payload = self.simulator.get_payload(event_class)
         run = await run_registry.create_run(source="mock", event=_serialize_event(payload.voevent))
         self.agent_state.run_id = run.run_id
         self.agent_state.last_gcn_event = payload.voevent.ivorn
@@ -274,6 +322,7 @@ class KilonovaScoutAgent(Agent):
 
         self.agent_state.status = "processing"
         self._measured_steps = []
+        _log_mem(run.run_id, "start")
 
         async def stamp(step: int, tool: str, status: str, attempt: int = 1,
                         input_s: str = "", output_s: str = "", err: str = "",
@@ -294,16 +343,48 @@ class KilonovaScoutAgent(Agent):
 
         if verdict.get("status") == "REJECTED":
             self.agent_state.status = "rejected"
-            return AgentOutput(message=verdict.get("reason", "Rejected by ingestion filter"), action_status="failure")
+            return AgentOutput(message=verdict.get("gate_reason", verdict.get("reason", "Rejected by ingestion filter")), action_status="failure")
 
-        # Step 2 — skymap (HEALPix) with the v3 fallback chain
-        await stamp(2, "healpix.parse_skymap", "running", input_s=skymap_url)
-        start = time.perf_counter()
-        skymap = await self._try_step("healpix", self.tools_instance.parse_healpix_map, run=run, step=3,
-                                      skymap_url=skymap_url, retries=2)
-        await stamp(2, "healpix.parse_skymap", "completed",
-                    output_s=f"skymap parsed [tier={getattr(skymap, 'provenance_source', 'unknown')}]",
-                    duration_ms=int((time.perf_counter() - start) * 1000))
+        # Per-run event-class setup: scoring profile + harvested trigger
+        # energetics (flux/signalness terms) for the catalog stage.
+        event_class = verdict.get("event_class") or "bns"
+        self.tools_instance.active_class = event_class
+        self.tools_instance.active_trigger_params = harvest_params(payload.voevent.what)
+        profile = get_profile(event_class)
+        await run_registry.attach(run.run_id, event_update={
+            "event_class": event_class,
+            "class_label": verdict.get("class_label"),
+            "gate_status": verdict.get("status"),
+            "gate_reason": verdict.get("gate_reason"),
+            "gate_confidence": verdict.get("gate_confidence"),
+            "gate_subclass": verdict.get("gate_subclass"),
+        })
+
+        # Step 2 — localization.  FITS triggers (LVC) use the v3 fallback
+        # chain; point-position triggers (GRB/neutrino RA/Dec + error radius)
+        # build the equivalent 90% HEALPix map directly.
+        ww = payload.voevent.wherewhen or {}
+        point_ra = ww.get("ra_deg")
+        point_dec = ww.get("dec_deg")
+        if point_ra is not None and point_dec is not None and not ww.get("skymap_url"):
+            point_err = float(ww.get("error_radius_deg") or 1.0)
+            await stamp(2, "healpix.point_localize", "running",
+                        input_s=f"RA {point_ra}, Dec {point_dec} ± {point_err}°")
+            start = time.perf_counter()
+            skymap = await self._try_step("healpix", self.tools_instance.build_point_skymap, run=run, step=3,
+                                          ra_deg=float(point_ra), dec_deg=float(point_dec),
+                                          radius_deg=point_err, retries=1)
+            await stamp(2, "healpix.point_localize", "completed",
+                        output_s=f"point map, {float(getattr(skymap, 'localization_area_sq_deg', 0.0) or 0.0):.1f} deg² [tier=synthetic]",
+                        duration_ms=int((time.perf_counter() - start) * 1000))
+        else:
+            await stamp(2, "healpix.parse_skymap", "running", input_s=skymap_url)
+            start = time.perf_counter()
+            skymap = await self._try_step("healpix", self.tools_instance.parse_healpix_map, run=run, step=3,
+                                          skymap_url=skymap_url, retries=2)
+            await stamp(2, "healpix.parse_skymap", "completed",
+                        output_s=f"skymap parsed [tier={getattr(skymap, 'provenance_source', 'unknown')}]",
+                        duration_ms=int((time.perf_counter() - start) * 1000))
         self.agent_state.current_skymap = skymap
 
         # Provenance (M4.4/4.5.5): record which skymap tier won
@@ -319,6 +400,8 @@ class KilonovaScoutAgent(Agent):
             "dist_std": getattr(skymap, "dist_std", None),
         }
         await run_registry.attach(run.run_id, event_update={"skymap_summary": skymap_stats})
+        _log_mem(run.run_id, "post-skymap")
+        gc.collect()
 
         # Dynamic re-pointing (M9.2): compare with the previous centroid for
         # this superevent; on a >10 deg shift, emit a re-authorization alert.
@@ -396,6 +479,8 @@ class KilonovaScoutAgent(Agent):
             "catalog": catalog_source or "mock",
             "event": run.source,
         })
+        _log_mem(run.run_id, "post-catalog-weather")
+        gc.collect()
 
         # Step 5 — ephemeris / observability. The full per-candidate windowed
         # airmass (M7.5), lunar separation (M7.3) and SNR proxy (M7.6) metrics
@@ -420,47 +505,55 @@ class KilonovaScoutAgent(Agent):
             await stamp(5, "ephemeris.observability", "failed", err=str(exc),
                         duration_ms=int((time.perf_counter() - start) * 1000))
 
-        # Step 6 — validator / GRB coincidence (real tool)
-        await stamp(6, "validator.multimessenger", "running", input_s="coincidence checks")
-        start = time.perf_counter()
+        # Step 6 — validator / GRB coincidence (real tool).  Only meaningful
+        # for GW triggers; a GRB (or neutrino) trigger skips this stage —
+        # checking a burst for coincidence with itself is tautological.
         grb_boost = 1.0
-        try:
-            top = galaxies[0] if galaxies else None
-            gw_time = (payload.voevent.wherewhen or {}).get("event_time") or last_mock_event_time()
-            grb_catalog = [
-                {"id": "GRB170817A", "time": "2017-08-17T12:41:06", "ra": 197.45, "dec": -23.38, "error_radius_deg": 0.5},
-            ]
-            vres = await asyncio.to_thread(
-                validator_agent.evaluate_gamma_ray_coincidence,
-                gw_time, top.ra_deg if top else 0.0, top.dec_deg if top else 0.0,
-                json.dumps(grb_catalog),
-            )
-            await stamp(6, "validator.multimessenger", "completed",
-                        output_s=f"coincidence={vres.get('coincidence_detected', False)}",
-                        duration_ms=int((time.perf_counter() - start) * 1000))
-            if vres.get("coincidence_detected") and top is not None:
-                # A real coincidence must move the ranking, not just the log:
-                # mirror the tools formula (additive boost, default 3.0).
-                boost = float(vres.get("priority_boost_factor", 3.0))
-                top.composite_score = (getattr(top, "composite_score", 0.0) or 0.0) + boost
-                bd = getattr(top, "score_breakdown", None)
-                if bd is not None:
-                    try:
-                        bd.terms["grb_boost"] = boost
-                        bd.total = float(top.composite_score)
-                    except Exception:
-                        pass
-                galaxies = sorted(
-                    galaxies,
-                    key=lambda g: (getattr(g, "composite_score", 0.0) or 0.0),
-                    reverse=True,
+        if not profile.get("needs_validator", True):
+            class_label = METADATA.get(event_class, METADATA["bns"])["label"]
+            await stamp(6, "validator.multimessenger", "skipped",
+                        output_s=f"not applicable — trigger is itself a {class_label} event")
+            grb_boost = 0.0
+        else:
+            await stamp(6, "validator.multimessenger", "running", input_s="coincidence checks")
+            start = time.perf_counter()
+            try:
+                top = galaxies[0] if galaxies else None
+                gw_time = (payload.voevent.wherewhen or {}).get("event_time") or last_mock_event_time()
+                grb_catalog = [
+                    {"id": "GRB170817A", "time": "2017-08-17T12:41:06", "ra": 197.45, "dec": -23.38, "error_radius_deg": 0.5},
+                ]
+                vres = await asyncio.to_thread(
+                    validator_agent.evaluate_gamma_ray_coincidence,
+                    gw_time, top.ra_deg if top else 0.0, top.dec_deg if top else 0.0,
+                    json.dumps(grb_catalog),
                 )
-                galaxies = normalize_priorities(galaxies)
-                self.agent_state.candidate_galaxies = galaxies
-                grb_boost = boost
-        except Exception as exc:
-            await stamp(6, "validator.multimessenger", "failed", err=str(exc),
-                        duration_ms=int((time.perf_counter() - start) * 1000))
+                await stamp(6, "validator.multimessenger", "completed",
+                            output_s=f"coincidence={vres.get('coincidence_detected', False)}",
+                            duration_ms=int((time.perf_counter() - start) * 1000))
+                if vres.get("coincidence_detected") and top is not None:
+                    # A real coincidence must move the ranking, not just the log:
+                    # mirror the tools formula (additive boost, default 3.0).
+                    boost = float(vres.get("priority_boost_factor", 3.0))
+                    top.composite_score = (getattr(top, "composite_score", 0.0) or 0.0) + boost
+                    bd = getattr(top, "score_breakdown", None)
+                    if bd is not None:
+                        try:
+                            bd.terms["grb_boost"] = boost
+                            bd.total = float(top.composite_score)
+                        except Exception:
+                            pass
+                    galaxies = sorted(
+                        galaxies,
+                        key=lambda g: (getattr(g, "composite_score", 0.0) or 0.0),
+                        reverse=True,
+                    )
+                    galaxies = normalize_priorities(galaxies)
+                    self.agent_state.candidate_galaxies = galaxies
+                    grb_boost = boost
+            except Exception as exc:
+                await stamp(6, "validator.multimessenger", "failed", err=str(exc),
+                            duration_ms=int((time.perf_counter() - start) * 1000))
 
         # Step 7 — scheduler / slew script
         await stamp(7, "scheduler.slew_script", "running", input_s="ASCOM/INDI generation")
@@ -513,6 +606,8 @@ class KilonovaScoutAgent(Agent):
 
         if visualizations:
             await run_registry.attach(run.run_id, visualizations=visualizations)
+        _log_mem(run.run_id, "post-viz")
+        gc.collect()
         await stamp(9, "llm.rationale", "completed", output_s=decision,
                     duration_ms=int((time.perf_counter() - start) * 1000))
         self.agent_state.llm_rationale = rationale
@@ -569,7 +664,7 @@ class KilonovaScoutAgent(Agent):
             await _emit_step(run, step=1, tool_name="ingestion.filter_gcn", status="skipped", attempt=attempt,
                              output_summary="using mock payload", error="live GCN unavailable")
             self.agent_state.source = "mock"
-            return _mock_verdict(mock_payload)
+            return _classify_trigger(mock_payload)
         try:
             return await self._try_step("ingestion", self._mock_ingest, run=run, step=2, payload=payload, retries=1)
         except Exception as exc:
@@ -590,7 +685,7 @@ class KilonovaScoutAgent(Agent):
 
     async def _mock_ingest(self, payload: GcnKafkaPayload) -> Dict[str, Any]:
         await asyncio.sleep(0.05)
-        return _mock_verdict(payload)
+        return _classify_trigger(payload)
 
     async def _llm_decision(self, verdict: Dict[str, Any], galaxies: List[Galaxy],
                             weather: ObservatoryWeather, skymap_summary: Optional[Dict[str, Any]],

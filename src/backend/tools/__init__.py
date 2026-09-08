@@ -8,13 +8,14 @@ to a strands.Agent as callable tools.
 """
 
 import datetime
+import gc
 import io
 import json
 import math
 import os
 import urllib.request
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import requests
@@ -42,6 +43,18 @@ from .scoring_tools import (
 )
 from .ephemeris_tools import integrated_airmass
 from .scheduling_tools import optimize_slew_order
+from ..event_classes import get_profile, flux_proxy
+
+
+def _pnum(value) -> Optional[float]:
+    """Coerce a harvested trigger parameter to float (None if absent)."""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def _load_scoring_weights() -> dict:
@@ -93,6 +106,10 @@ class KilonovaScoutTools:
         self.observatory_location = EarthLocation(lat=lat * u.deg, lon=lon * u.deg, height=alt * u.m)
         self._weather_cache: Optional[ObservatoryWeather] = None
         self._weather_cache_time: Optional[Time] = None
+        # Multi-event support: the orchestrator sets these per run before
+        # calling query_glade_catalog.  Defaults reproduce the v3 BNS path.
+        self.active_class: str = "bns"
+        self.active_trigger_params: Dict[str, Any] = {}
 
     @tool
     def parse_healpix_map(self, skymap_url: str) -> HealpixSkymap:
@@ -176,6 +193,10 @@ class KilonovaScoutTools:
         # 90% credible area = number of pixels in the region x pixel area
         area_sq_deg = float(len(top_90_idx) * pixel_area_sr * (180.0 / np.pi) ** 2)
 
+        # Release full-sky working arrays promptly (512 MB instances).
+        del table, prob, distmu, distsigma, p_pix, sorted_idx, cum_prob
+        gc.collect()
+
         return HealpixSkymap(
             url=skymap_url,
             nside=int(nside),
@@ -185,6 +206,61 @@ class KilonovaScoutTools:
             provenance_source=source,
             dist_mean=mean_dist if np.isfinite(mean_dist) else 40.0,
             dist_std=dist_std if np.isfinite(dist_std) else 8.0,
+        )
+
+    @tool
+    def build_point_skymap(self, ra_deg: float, dec_deg: float, radius_deg: float = 1.0) -> HealpixSkymap:
+        """Builds a HEALPix localization map for point-position triggers.
+
+        GRB and neutrino notices carry a sky position plus an error radius —
+        not a FITS skymap.  This constructs the equivalent 90%-credible
+        HEALPix map (Gaussian falloff, normalized) so every downstream stage
+        (catalog crossmatch, scoring, visualization, report) runs on the
+        identical code path as FITS triggers.  Provenance is ``synthetic``.
+        """
+        sigma = max(float(radius_deg or 1.0), 0.05)
+        # Adaptive resolution: keep the 90% pixel count in the hundreds for
+        # the 512 MB Render budget regardless of error-circle size.
+        nside = 64 if sigma >= 2.0 else (128 if sigma >= 0.5 else 256)
+        r90 = 2.146 * sigma  # Gaussian 90% containment radius
+        npix = 12 * nside * nside
+        pixel_area_deg2 = 41253.0 / npix
+
+        center = SkyCoord(ra=float(ra_deg) * u.deg, dec=float(dec_deg) * u.deg, frame="icrs")
+        try:
+            idx = np.asarray(ah.healpix_cone_search(
+                center.ra, center.dec, radius=r90 * u.deg, nside=nside, order="nested"
+            ), dtype=np.int64)
+        except Exception as e:
+            print(f"[SYS] point cone search failed ({e}); single-pixel fallback")
+            idx = np.asarray([ah.lonlat_to_healpix(center.ra, center.dec, nside, order="nested")], dtype=np.int64)
+        if len(idx) == 0:
+            idx = np.asarray([ah.lonlat_to_healpix(center.ra, center.dec, nside, order="nested")], dtype=np.int64)
+
+        ra_arr, dec_arr = ah.healpix_to_lonlat(idx, nside, order="nested")
+        pts = SkyCoord(ra=ra_arr, dec=dec_arr, frame="icrs")
+        sep_deg = center.separation(pts).deg
+        p = np.exp(-0.5 * (sep_deg / sigma) ** 2)
+        total = float(p.sum())
+        p = p / total if total > 0 else np.full_like(p, 1.0 / len(p))
+
+        order = np.argsort(p)[::-1]
+        cum = np.cumsum(p[order])
+        top_90 = order[cum <= 0.90]
+        if len(top_90) == 0:
+            top_90 = order[:1]
+        sel_idx = idx[top_90]
+        sel_p = p[top_90]
+
+        return HealpixSkymap(
+            url=f"point://{float(ra_deg):.3f},{float(dec_deg):.3f}/r{sigma:.2f}deg",
+            nside=int(nside),
+            probdensity=[float(v) for v in sel_p],
+            supercell_indices=[int(v) for v in sel_idx],
+            localization_area_sq_deg=float(len(sel_idx) * pixel_area_deg2),
+            provenance_source="synthetic",
+            dist_mean=None,
+            dist_std=None,
         )
 
     @tool
@@ -200,17 +276,40 @@ class KilonovaScoutTools:
         (Milestones 7 + 10) regardless of data source:
           S = alpha*P_spatial + beta*Schechter(L_K) - gamma*X_i - delta*C
               + epsilon*B_GRB + zeta*snr_proxy - eta*L_moon
+              (+ theta*flux + kappa*signalness for non-merger classes)
+
+        Multi-event support: the orchestrator sets ``active_class`` (and the
+        harvested ``active_trigger_params``) per run.  The BNS class keeps
+        reading the tunable config file exactly as before; other classes use
+        their registry profile (host-mass and kilonova terms disabled where
+        the physics does not apply).
         """
         from .network_tools import query_glade_vizier_tap, load_bundled_glade_cache, get_mock_galaxies
 
+        active_class = getattr(self, "active_class", "bns") or "bns"
+        profile = get_profile(active_class)
         weights = _load_scoring_weights()
-        alpha = float(weights.get("spatial_weight_alpha", 1.0))
-        beta = float(weights.get("mass_weight_beta", 0.5))
-        gamma = float(weights.get("extinction_gamma", 0.3))
-        delta = float(weights.get("weather_delta", 0.2))
-        epsilon = float(weights.get("coincidence_boost", 3.0))
-        zeta = float(weights.get("snr_weight_zeta", 0.15))
-        eta = float(weights.get("lunar_penalty_eta", 0.1))
+        if active_class == "bns":
+            # BNS keeps the tunable config-file weights exactly as before.
+            alpha = float(weights.get("spatial_weight_alpha", 1.0))
+            beta = float(weights.get("mass_weight_beta", 0.5))
+            gamma = float(weights.get("extinction_gamma", 0.3))
+            delta = float(weights.get("weather_delta", 0.2))
+            epsilon = float(weights.get("coincidence_boost", 3.0))
+            zeta = float(weights.get("snr_weight_zeta", 0.15))
+            eta = float(weights.get("lunar_penalty_eta", 0.1))
+        else:
+            pw = profile["weights"]
+            alpha = float(pw["alpha"])
+            beta = float(pw["beta"])
+            gamma = float(pw["gamma"])
+            delta = float(pw["delta"])
+            epsilon = float(pw["epsilon"])
+            zeta = float(pw["zeta"])
+            eta = float(pw["eta"])
+        # Shared physics constants always come from the config file.
+        theta = float(profile["weights"]["theta"])
+        kappa = float(profile["weights"]["kappa"])
         l_star = float(weights.get("schechter_l_star", 1.0e10))
         schechter_alpha = float(weights.get("schechter_alpha", -1.0))
         k_ext = float(weights.get("zenith_extinction", 0.12))
@@ -223,9 +322,18 @@ class KilonovaScoutTools:
         # centers (probability-weighted mean on the unit sphere) — no hardcoded
         # GW170817 coordinates anywhere (M4.5.2).
         ra_center, dec_center, prob_lookup = self._skymap_geometry(skymap)
-        dist_mean = float(getattr(skymap, "dist_mean", None) or 40.0)
-        dist_std = float(getattr(skymap, "dist_std", None) or 8.0)
-        ra_span, dec_span = 2.5, 2.5  # TAP search box half-width (degrees)
+        # Distance window: point-localized events (GRB/neutrino) carry no
+        # distance estimate, so use a wide window = no distance constraint.
+        if getattr(skymap, "dist_mean", None) is None:
+            dist_mean, dist_std = 150.0, 150.0
+        else:
+            dist_mean = float(getattr(skymap, "dist_mean", None) or 40.0)
+            dist_std = float(getattr(skymap, "dist_std", None) or 8.0)
+        # Search box scales with the localization area (GW170817's 31 deg^2
+        # reproduces the historical half-width of ~2.8 deg).
+        area = float(getattr(skymap, "localization_area_sq_deg", None) or 31.0)
+        span = min(5.0, max(1.0, math.sqrt(area) / 2.0))
+        ra_span, dec_span = span, span
 
         # Tier 1: live VizieR TAP query
         try:
@@ -270,7 +378,16 @@ class KilonovaScoutTools:
         formula_weights = {
             "alpha": alpha, "beta": beta, "gamma": gamma, "delta": delta,
             "epsilon": epsilon, "zeta": zeta, "eta": eta,
+            "theta": theta, "kappa": kappa,
         }
+        # Class-specific trigger energetics (harvested once per run, shared
+        # by every candidate — never per-candidate network calls).
+        trig = getattr(self, "active_trigger_params", {}) or {}
+        trig_flux = flux_proxy(
+            fluence=_pnum(trig.get("fluence", trig.get("burst_fluence"))),
+            peak_flux=_pnum(trig.get("peak_flux", trig.get("peakflux", trig.get("flux_peak")))),
+        ) if theta > 0 else 0.0
+        trig_signalness = (_pnum(trig.get("signalness", trig.get("signal_trackness", trig.get("p_astro")))) or 0.0) if kappa > 0 else 0.0
 
         galaxies: List[Galaxy] = []
         for c in candidates_raw:
@@ -302,12 +419,19 @@ class KilonovaScoutTools:
             lunar = lunar_penalty(ra, dec)
             L_moon = float(lunar.get("lunar_penalty", 0.0))
 
-            # Schechter luminosity function weight (M7.1)
-            w_schechter = schechter_weight(lum_k, l_star=l_star, alpha=schechter_alpha) if lum_k > 0 else 0.0
+            # Schechter luminosity function weight (M7.1).  Skipped when the
+            # active class disables host-mass weighting (beta = 0).
+            w_schechter = schechter_weight(lum_k, l_star=l_star, alpha=schechter_alpha) if (lum_k > 0 and beta > 0) else 0.0
 
-            # Distance-based kilonova detectability proxy (M7.6)
-            snr_info = estimate_kilonova_snr(dist, peak_mag=peak_mag)
-            snr_proxy = float(snr_info.get("snr_proxy", 0.0))
+            # Distance-based kilonova detectability proxy (M7.6).  Skipped
+            # when the active class disables it (zeta = 0: the KN peak-magnitude
+            # scale is meaningless for GRB afterglows and neutrinos).
+            if zeta > 0:
+                snr_info = estimate_kilonova_snr(dist, peak_mag=peak_mag)
+                snr_proxy = float(snr_info.get("snr_proxy", 0.0))
+                apparent_mag = snr_info.get("apparent_mag")
+            else:
+                snr_proxy, apparent_mag = 0.0, None
 
             # R-band atmospheric extinction in magnitudes (M7.4)
             extinction_mag = atmospheric_extinction(X_i, zenith_extinction=k_ext)
@@ -320,6 +444,8 @@ class KilonovaScoutTools:
                 "grb_boost": 0.0,  # applied later by the validator stage
                 "snr": snr_proxy,
                 "lunar": L_moon,
+                "flux": trig_flux,
+                "signalness": trig_signalness,
             }
             composite_score = compute_full_score(terms, formula_weights)
 
@@ -340,8 +466,10 @@ class KilonovaScoutTools:
                     "extinction_mag": round(extinction_mag, 4),
                     "moon_separation_deg": lunar.get("moon_separation_deg"),
                     "moon_safe": lunar.get("moon_safe"),
-                    "apparent_mag": snr_info.get("apparent_mag"),
+                    "apparent_mag": apparent_mag,
                     "snr_proxy": snr_proxy,
+                    "flux_proxy": trig_flux,
+                    "signalness": trig_signalness,
                 },
             )
             g.composite_score = composite_score

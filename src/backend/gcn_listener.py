@@ -17,6 +17,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from .models import GcnKafkaPayload, Voevent
+from .event_classes import class_for_topic, enabled_classes, topics_for
 
 
 TOPICS_DEFAULT = [
@@ -68,6 +69,25 @@ def _parse_voevent_xml(xml_text: bytes) -> Optional[Voevent]:
         t_el = root.find(".//v:ISOTime", ns)
         if t_el is not None:
             wherewhen["event_time"] = t_el.text
+
+        # Point position (GRB / neutrino notices): VOEvent v2.0 AstroCoords.
+        # C1/C2 are RA/Dec in degrees by convention — honor the unit attr.
+        for coords in root.findall(".//v:AstroCoords", ns):
+            pos = coords.find("./v:Position2D/v:Value2", ns)
+            if pos is not None and "deg" in (pos.get("unit", "deg") or "deg").lower():
+                try:
+                    c1 = pos.find("v:C1", ns)
+                    c2 = pos.find("v:C2", ns)
+                    wherewhen["ra_deg"] = float(c1.text)
+                    wherewhen["dec_deg"] = float(c2.text)
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            err = coords.find("./v:Position2D/v:Error2Radius", ns)
+            if err is not None and err.text:
+                try:
+                    wherewhen["error_radius_deg"] = float(err.text)
+                except (TypeError, ValueError):
+                    pass
 
         # Find skymap URL from Param with name containing 'skymap' or 'bayestar'
         what: List[Dict[str, Any]] = []
@@ -172,6 +192,7 @@ class GcnListener:
         self._running = False
         self._latest_live: Optional[Dict[str, Any]] = None
         self._lock = threading.Lock()
+        self._topics: List[str] = topics_for(enabled_classes())
 
     def start(self) -> None:
         """Start the listener.  Non-blocking; safe to call even with no creds."""
@@ -202,8 +223,8 @@ class GcnListener:
         )
         self._consumer = consumer
         try:
-            consumer.subscribe(TOPICS_DEFAULT)
-            print(f"[GCN] Listening on {len(TOPICS_DEFAULT)} LVC topics...")
+            consumer.subscribe(self._topics)
+            print(f"[GCN] Listening on {len(self._topics)} topics ({', '.join(self._topics)})...")
             loop = asyncio.get_running_loop()
             import functools
             consecutive_errors = 0
@@ -247,6 +268,23 @@ class GcnListener:
         finally:
             self._running = False
 
+    def update_topics(self, topics: List[str]) -> None:
+        """Resubscribe the live consumer (called when alert classes change).
+
+        Thread-safe: acts on the running consumer; the poll loop picks up
+        the new subscription on its next iteration.  No-op in mock mode.
+        """
+        self._topics = list(topics)
+        consumer = self._consumer
+        if consumer is None:
+            return
+        try:
+            consumer.unsubscribe()
+            consumer.subscribe(self._topics)
+            print(f"[GCN] Resubscribed to {len(self._topics)} topics.")
+        except Exception as e:
+            print(f"[GCN] resubscribe failed ({e})")
+
     def _process_message(self, message) -> Optional[GcnKafkaPayload]:
         try:
             topic = message.topic()
@@ -256,6 +294,10 @@ class GcnListener:
             voevent = _parse_voevent_xml(bytes(message.value()))
             if voevent is None:
                 return None
+
+            # Tag the event class on the flexible wherewhen dict (no model
+            # change needed) so the orchestrator can select gate + profile.
+            voevent.wherewhen["event_class"] = class_for_topic(topic)
 
             if voevent.role == "retraction":
                 # Flag retractions in state (handled by caller via on_notice)

@@ -19,21 +19,30 @@ no disk writes.
 from __future__ import annotations
 
 import base64
+import gc
 import io
 import math
 from typing import Any, Dict, List, Optional
 
-import matplotlib
-
-matplotlib.use("Agg")  # headless — must be set before pyplot import
-import matplotlib.pyplot as plt
 import numpy as np
 
 _DARK_TEXT = "#e8e8f0"
 _DARK_BG = "#0d1117"
 
 
+def _pyplot():
+    """Import pyplot lazily (Agg backend) — keeps ~50-80 MB of matplotlib
+    out of the process RSS until a run actually renders plots.  Critical
+    for the 512 MB Render free tier: import cost is paid per-run, inside
+    the existing to_thread worker, instead of at server boot."""
+    import matplotlib
+    matplotlib.use("Agg")  # headless — must be set before pyplot import
+    import matplotlib.pyplot as plt
+    return plt
+
+
 def _apply_dark_style() -> None:
+    plt = _pyplot()
     plt.style.use("dark_background")
     plt.rcParams.update({
         "figure.facecolor": _DARK_BG,
@@ -49,9 +58,12 @@ def _apply_dark_style() -> None:
 
 
 def _fig_to_base64(fig) -> str:
+    plt = _pyplot()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
     plt.close(fig)
+    del fig
+    gc.collect()  # release figure cycles promptly on 512 MB instances
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -64,6 +76,7 @@ def _fallback_figure(title: str, reason: str) -> str:
     """
     try:
         _apply_dark_style()
+        plt = _pyplot()
         fig, ax = plt.subplots(figsize=(6, 2.2))
         ax.axis("off")
         ax.text(0.5, 0.6, title, ha="center", va="center", fontsize=11, color=_DARK_TEXT)
@@ -77,6 +90,7 @@ def _fallback_figure(title: str, reason: str) -> str:
 def plot_skymap_with_candidates(skymap, candidates: List[Dict[str, Any]]) -> str:
     """Mollweide skymap of the 90% region with candidate positions overlaid."""
     _apply_dark_style()
+    plt = _pyplot()
     fig, ax = plt.subplots(figsize=(9, 4.6), subplot_kw={"projection": "mollweide"})
 
     indices = list(getattr(skymap, "supercell_indices", []) or [])
@@ -122,6 +136,7 @@ def plot_skymap_with_candidates(skymap, candidates: List[Dict[str, Any]]) -> str
 def plot_scoring_breakdown(candidates: List[Dict[str, Any]]) -> str:
     """Horizontal bar chart of each candidate's weighted score decomposition."""
     _apply_dark_style()
+    plt = _pyplot()
     names = [str(c.get("name", "?"))[:14] for c in candidates]
     term_keys = [
         ("spatial", "alpha", "spatial (α·P)", "#3ad6c5"),
@@ -159,6 +174,7 @@ def plot_scoring_breakdown(candidates: List[Dict[str, Any]]) -> str:
 def plot_observing_conditions(candidates: List[Dict[str, Any]]) -> str:
     """Radar chart of normalized observability metrics for the top candidates."""
     _apply_dark_style()
+    plt = _pyplot()
     metrics = [
         ("Altitude cov.", lambda o: float(o.get("observable_fraction") or 0)),
         ("Airmass inv.", lambda o: 1.0 / ((float(o.get("mean_airmass") or 38)) or 38)),
@@ -191,6 +207,7 @@ def plot_observing_conditions(candidates: List[Dict[str, Any]]) -> str:
 def plot_distance_distribution(skymap, candidates: List[Dict[str, Any]]) -> str:
     """Candidate distance distribution with the skymap distance band shaded."""
     _apply_dark_style()
+    plt = _pyplot()
     fig, ax = plt.subplots(figsize=(8, 4.0))
 
     dists = [float(c.get("distance_mpc") or 0) for c in candidates if c.get("distance_mpc")]
