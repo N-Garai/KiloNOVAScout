@@ -94,12 +94,23 @@ cd src/frontend && npm install
 ### Running
 
 ```bash
-# Backend (from repo root)
-PYTHONPATH=src python -u src/backend/main.py
+# Backend (from repo root — package mode is required for relative imports)
+PYTHONPATH=src python -u -m backend.main
 
 # Frontend (separate terminal)
 cd src/frontend && npm run dev
 ```
+
+Windows PowerShell equivalents:
+
+```powershell
+$env:PYTHONPATH = 'src'; python -u -m backend.main
+cd src/frontend; npm run dev
+```
+
+Then open http://localhost:5173 (Vite proxies `/api` and `/agent` to the
+backend on :8000). Copy `.env.example` to `.env` first — the backend loads
+it automatically for keys, credentials, and observatory defaults.
 
 ### Docker
 

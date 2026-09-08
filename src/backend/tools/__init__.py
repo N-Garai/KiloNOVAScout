@@ -130,6 +130,21 @@ class KilonovaScoutTools:
             with urllib.request.urlopen(skymap_url, timeout=15) as r:
                 fits_bytes = r.read()
                 source = "live"
+            # OOM guard: peek at the row count from the FITS header WITHOUT
+            # loading pixel data. Anything above nside-512 scale (3.1M rows)
+            # cannot be parsed inside 512 MB (the old bundled nside-2048 map
+            # was 50M rows / 1.6 GB and SIGKILLed free-tier instances), so
+            # oversize files are declined here and fall through to replay.
+            try:
+                from astropy.io import fits as _fits
+                with _fits.open(io.BytesIO(fits_bytes)) as _hdul:
+                    _nrow = int(_hdul[1].header.get("NAXIS2", 0)) if len(_hdul) > 1 else 0
+            except Exception:
+                _nrow = 0
+            if _nrow > 3145728:
+                print(f"[SYS] live skymap too large ({_nrow} rows); using replay tier")
+                fits_bytes = None
+                source = "synthetic"
         except Exception as e:
             print(f"[SYS] skymap download failed ({e})")
 
@@ -160,11 +175,17 @@ class KilonovaScoutTools:
                 dist_std=8.0,
             )
 
-        # Parse real FITS bytes (live or replay — same code path)
+        # Parse real FITS bytes (live or replay — same code path).
+        # float32 throughout: halves the transient peak vs float64 with no
+        # science impact at these precisions.  BAYESTAR DISTMU/DISTSIGMA
+        # legitimately contain inf/NaN in zero-probability pixels — the
+        # isfinite guards below (plus probability weighting) handle that.
         table = Table.read(io.BytesIO(fits_bytes))
-        prob = np.array(table['PROB'], dtype=float)
-        distmu = np.array(table['DISTMU'], dtype=float)
-        distsigma = np.array(table['DISTSIGMA'], dtype=float)
+        prob = np.array(table['PROB'], dtype=np.float32)
+        distmu = np.array(table['DISTMU'], dtype=np.float32)
+        distsigma = np.array(table['DISTSIGMA'], dtype=np.float32)
+        del table
+        gc.collect()
 
         npix = len(prob)
         nside = ah.npix_to_nside(npix)
@@ -173,7 +194,7 @@ class KilonovaScoutTools:
         # LIGO skymaps store PROB as probability DENSITY (per steradian) when
         # npix is large; normalize to per-pixel probabilities so downstream
         # consumers get values on a true 0..1 probability scale.
-        p_pix = prob * pixel_area_sr
+        p_pix = prob * np.float32(pixel_area_sr)
         total_p = float(p_pix.sum())
         if total_p > 0:
             p_pix = p_pix / total_p
@@ -187,21 +208,25 @@ class KilonovaScoutTools:
         ra, dec = ah.healpix_to_lonlat(top_90_idx, nside, order='nested')
 
         w = p_pix[top_90_idx]
-        mean_dist = float(np.average(distmu[top_90_idx], weights=w))
-        dist_std = float(np.average(distsigma[top_90_idx], weights=w))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean_dist = float(np.average(distmu[top_90_idx], weights=w))
+            dist_std = float(np.average(distsigma[top_90_idx], weights=w))
 
         # 90% credible area = number of pixels in the region x pixel area
         area_sq_deg = float(len(top_90_idx) * pixel_area_sr * (180.0 / np.pi) ** 2)
 
-        # Release full-sky working arrays promptly (512 MB instances).
-        del table, prob, distmu, distsigma, p_pix, sorted_idx, cum_prob
+        # Materialize the small 90% outputs FIRST, then release the full-sky
+        # working arrays (order matters — the return below needs them).
+        probdensity_out = p_pix[top_90_idx].tolist()
+        supercell_out = top_90_idx.tolist()
+        del prob, distmu, distsigma, p_pix, sorted_idx, cum_prob, top_90_idx, w
         gc.collect()
 
         return HealpixSkymap(
             url=skymap_url,
             nside=int(nside),
-            probdensity=p_pix[top_90_idx].tolist(),
-            supercell_indices=top_90_idx.tolist(),
+            probdensity=probdensity_out,
+            supercell_indices=supercell_out,
             localization_area_sq_deg=area_sq_deg,
             provenance_source=source,
             dist_mean=mean_dist if np.isfinite(mean_dist) else 40.0,

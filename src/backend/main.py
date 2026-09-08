@@ -18,6 +18,10 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import List, Optional
+from dotenv import load_dotenv
+
+load_dotenv()  # repo-root .env support for laptop runs (Render uses dashboard env)
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware

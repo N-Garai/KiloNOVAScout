@@ -298,50 +298,54 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             When the sky is quiet, the agent replays an archived event as a fallback simulation.
           </p>
 
-          {/* Demo trigger-class picker */}
-          <div className="mb-5">
-            <div className="font-mono text-[10px] text-gray-500 uppercase tracking-widest mb-2">Demo trigger class</div>
-            <div className="flex flex-wrap justify-center gap-2">
-              {(eventClasses.length ? eventClasses : [{ key: 'bns', label: 'Neutron-star merger' }]).map((c) => (
-                <button
-                  key={c.key}
-                  onClick={() => setSimClass(c.key)}
-                  disabled={loading}
-                  title={c.blurb || c.label}
-                  className={`px-4 py-2 rounded-lg font-mono text-xs border transition-all disabled:opacity-50 ${
-                    simClass === c.key
-                      ? 'border-cosmic-cyan/60 bg-cosmic-cyan/10 text-cosmic-cyan'
-                      : 'border-white/10 text-gray-400 hover:border-white/30 hover:text-gray-200'
-                  }`}
-                >
-                  {c.label}
-                </button>
-              ))}
+          {/* Cosmic events — one panel: pick the demo trigger (radio) and
+              toggle live Kafka watch per family (persisted to backend). */}
+          <div className="max-w-3xl mx-auto mb-8 glass rounded-2xl border border-white/10 p-5 text-left">
+            <div className="font-mono text-[10px] text-gray-500 uppercase tracking-widest mb-1 text-center">
+              Cosmic events {watchSaving && <span className="text-yellow-400">· saving…</span>}
             </div>
-          </div>
-
-          {/* Live-watch toggles (persisted to backend config) */}
-          <div className="mb-8">
-            <div className="font-mono text-[10px] text-gray-500 uppercase tracking-widest mb-2">
-              Live watch {watchSaving && <span className="text-yellow-400">· saving…</span>}
+            <div className="font-mono text-[10px] text-gray-600 mb-4 text-center">
+              <span className="text-cosmic-cyan">◉ simulate</span> = demo trigger &nbsp;·&nbsp;
+              <span className="text-green-400">● watch</span> = live Kafka subscription
             </div>
-            <div className="flex flex-wrap justify-center gap-2">
-              {(eventClasses.length ? eventClasses : [{ key: 'bns', label: 'Neutron-star merger' }]).map((c) => {
-                const on = enabledClasses.includes(c.key)
+            <div className="space-y-2">
+              {(eventClasses.length ? eventClasses : [{ key: 'bns', label: 'Neutron-star merger', blurb: '' }]).map((c) => {
+                const picked = simClass === c.key
+                const watched = enabledClasses.includes(c.key)
                 return (
-                  <button
+                  <div
                     key={c.key}
-                    onClick={() => toggleWatchClass(c.key)}
-                    disabled={loading || watchSaving}
-                    title={on ? `Watching ${c.label} — click to mute` : `Muted — click to watch ${c.label}`}
-                    className={`px-4 py-2 rounded-lg font-mono text-xs border transition-all disabled:opacity-50 ${
-                      on
-                        ? 'border-green-400/50 bg-green-500/10 text-green-300'
-                        : 'border-white/10 text-gray-600 hover:border-white/25'
+                    className={`flex items-center gap-3 rounded-xl border px-4 py-3 transition-all ${
+                      picked ? 'border-cosmic-cyan/50 bg-cosmic-cyan/5' : 'border-white/10 hover:border-white/25'
                     }`}
                   >
-                    {on ? '● ' : '○ '}{c.label}
-                  </button>
+                    <button
+                      onClick={() => setSimClass(c.key)}
+                      disabled={loading}
+                      title={`Simulate a ${c.label} trigger`}
+                      className={`font-mono text-sm w-6 text-center transition-colors disabled:opacity-50 ${
+                        picked ? 'text-cosmic-cyan' : 'text-gray-600 hover:text-gray-300'
+                      }`}
+                    >
+                      {picked ? '◉' : '○'}
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-cosmic text-sm text-white">{c.label}</div>
+                      {c.blurb && <div className="font-mono text-[11px] text-gray-500 truncate">{c.blurb}</div>}
+                    </div>
+                    <button
+                      onClick={() => toggleWatchClass(c.key)}
+                      disabled={loading || watchSaving}
+                      title={watched ? `Watching ${c.label} live — click to mute` : `Muted — click to watch ${c.label} live`}
+                      className={`font-mono text-[11px] px-3 py-1.5 rounded-lg border transition-all disabled:opacity-50 ${
+                        watched
+                          ? 'border-green-400/50 bg-green-500/10 text-green-300'
+                          : 'border-white/10 text-gray-600 hover:border-white/25 hover:text-gray-400'
+                      }`}
+                    >
+                      {watched ? '● WATCH' : '○ MUTED'}
+                    </button>
+                  </div>
                 )
               })}
             </div>
@@ -352,7 +356,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             disabled={loading}
             className="px-12 py-4 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold text-lg hover:opacity-90 transition-opacity glow-cyan disabled:opacity-50"
           >
-            {loading ? (wakingBackend ? 'WAKING BACKEND…' : 'PROCESSING…') : 'LAUNCH GCN ALERT'}
+            {loading
+              ? (wakingBackend ? 'WAKING BACKEND…' : 'PROCESSING…')
+              : `LAUNCH ${((eventClasses.find((c) => c.key === simClass) || {}).label || simClass || 'GCN').toUpperCase()} ALERT`}
           </button>
 
           {wakingBackend && loading && (

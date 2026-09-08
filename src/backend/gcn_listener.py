@@ -31,7 +31,7 @@ def _has_gcn_creds() -> bool:
     return bool(os.getenv("GCN_KAFKA_CLIENT_ID") and os.getenv("GCN_KAFKA_CLIENT_SECRET"))
 
 
-def _parse_voevent_xml(xml_text: bytes) -> Optional[Voevent]:
+def _parse_voevent_xml(xml_text: bytes, topic: str = "") -> Optional[Voevent]:
     """Parse a GCN VOEvent XML payload into a Voevent model.
 
     Uses a lightweight XML-to-dict extraction.  Falls back to None on
@@ -123,7 +123,8 @@ def _parse_voevent_xml(xml_text: bytes) -> Optional[Voevent]:
             what=what,
         )
     except Exception as e:
-        print(f"[GCN] Failed to parse VOEvent: {e}")
+        preview = (xml_text[:40] if isinstance(xml_text, (bytes, bytearray)) else str(xml_text)[:40])
+        print(f"[GCN] Dropping non-VOEvent payload on {topic or 'unknown topic'}: {e} (head={preview!r})")
         return None
 
 
@@ -291,7 +292,7 @@ class GcnListener:
             offset = message.offset()
             timestamp = message.timestamp()[1] if message.timestamp() else None
 
-            voevent = _parse_voevent_xml(bytes(message.value()))
+            voevent = _parse_voevent_xml(bytes(message.value()), topic=topic)
             if voevent is None:
                 return None
 
