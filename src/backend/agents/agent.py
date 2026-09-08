@@ -102,11 +102,11 @@ class _ToolAuditHook:
 
 
 def _primary_model() -> str:
-    return os.getenv("PRIMARY_LLM", "gemini/gemini-1.5-flash")
+    return os.getenv("PRIMARY_LLM", "gemini/gemini-2.5-flash")
 
 
 def _fallback_model() -> str:
-    return os.getenv("FALLBACK_LLM", "groq/llama3-70b-8192")
+    return os.getenv("FALLBACK_LLM", "groq/openai/gpt-oss-120b")
 
 
 def _build_model(model_id: str) -> LiteLLMModel:
@@ -200,6 +200,15 @@ def _classify_trigger(payload: GcnKafkaPayload) -> Dict[str, Any]:
     ww = payload.voevent.wherewhen or {}
     event_class = ww.get("event_class") or "bns"
     gate = evaluate_trigger(event_class, payload.voevent.what)
+    # Non-merger triggers without ANY localization (no skymap URL and no
+    # RA/Dec) cannot be pointed at — reject honestly instead of running the
+    # pipeline on an unrelated replay map.
+    if (gate["status"] == "ACCEPTED" and event_class != "bns"
+            and not ww.get("skymap_url") and ww.get("ra_deg") is None):
+        gate = {"status": "REJECTED",
+                "reason": "notice carries no sky localization (no skymap, no position)",
+                "confidence": 0.9, "subclass": "unlocalized",
+                "class_key": gate["class_key"]}
     base = _mock_verdict(payload)
     base.update({
         "event_class": gate["class_key"],

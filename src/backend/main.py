@@ -71,8 +71,15 @@ OBSERVATORY_LON = _get_float("OBSERVATORY_LON", -116.865)
 OBSERVATORY_ALT = _get_float("OBSERVATORY_ALT", 1706)
 
 # LLM Configuration
-PRIMARY_LLM = os.getenv("PRIMARY_LLM", "gemini/gemini-1.5-flash")
-FALLBACK_LLM = os.getenv("FALLBACK_LLM", "groq/llama3-70b-8192")
+PRIMARY_LLM = os.getenv("PRIMARY_LLM", "gemini/gemini-2.5-flash")
+FALLBACK_LLM = os.getenv("FALLBACK_LLM", "groq/openai/gpt-oss-120b")
+
+# GraceDB REST poller (opt-in live BNS path that needs no Kafka/IPv6).
+GRACEDB_POLL = os.getenv("GRACEDB_POLL", "false").lower() in ("1", "true", "yes")
+try:
+    GRACEDB_POLL_MINUTES = max(5.0, float(os.getenv("GRACEDB_POLL_MINUTES", "15")))
+except (TypeError, ValueError):
+    GRACEDB_POLL_MINUTES = 15.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -89,11 +96,29 @@ async def lifespan(app: FastAPI):
         logger.info("[startup] GCN listener scheduled (mock-only mode if no creds).")
     except Exception as e:
         logger.warning(f"[startup] GCN listener start failed (continuing): {e}")
+    app.state.gracedb = {"enabled": False, "last_check": None, "last_result": "disabled"}
+    if GRACEDB_POLL:
+        try:
+            from .gracedb_poller import start_poller
+            loop = asyncio.get_running_loop()
+            state: dict = {"enabled": True, "last_check": None, "last_result": "starting"}
+            app.state.gracedb = state
+            # Fresh handler lookup per trigger: observatory updates recreate
+            # the agent, and the poller must never call a stale instance.
+            stopper = start_poller(lambda: kilonova_agent.handle_live_notice,
+                                   loop, state, interval_min=GRACEDB_POLL_MINUTES)
+            app.state.gracedb_stopper = stopper
+            logger.info(f"[startup] GraceDB poller on (every {GRACEDB_POLL_MINUTES:.0f} min).")
+        except Exception as e:
+            logger.warning(f"[startup] GraceDB poller start failed (continuing): {e}")
     yield
     try:
         listener = getattr(app.state, "gcn_listener", None)
         if listener is not None:
             listener.stop()
+        stopper = getattr(app.state, "gracedb_stopper", None)
+        if stopper is not None:
+            stopper.set()
     except Exception:
         pass
 
@@ -481,6 +506,7 @@ async def api_ping():
         "status": "ok",
         "observatory": OBSERVATORY_NAME,
         "time": datetime.datetime.utcnow().isoformat() + "Z",
+        "gracedb_poll": dict(getattr(app.state, "gracedb", {"enabled": False})),
     }
 
 

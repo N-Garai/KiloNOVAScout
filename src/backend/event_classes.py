@@ -257,11 +257,23 @@ CLASS_TOPICS: Dict[str, List[str]] = {
     "grb": [
         "gcn.classic.voevent.FERMI_GBM_ALERT",
         "gcn.classic.voevent.FERMI_GBM_FIN_POS",
-        "gcn.classic.voevent.SWIFT_BAT_ALERT",
+        # Ground-refined GBM position (arrives later, tighter error circle —
+        # flows through the same gate and re-triggers the pipeline).
+        "gcn.classic.voevent.FERMI_GBM_GND_POS",
+        # NOTE: there is no classic notice type called SWIFT_BAT_ALERT — the
+        # real BAT position stream is SWIFT_BAT_GRB_POS_ACK (arcminute, 13-30 s
+        # latency) with SWIFT_XRT_POSITION refining to arcseconds.  The wrong
+        # name produced "Subscribed topic not available" from the broker.
+        "gcn.classic.voevent.SWIFT_BAT_GRB_POS_ACK",
+        "gcn.classic.voevent.SWIFT_XRT_POSITION",
     ],
     "neutrino": [
         "gcn.classic.voevent.ICECUBE_ASTROTRACK_GOLD",
         "gcn.classic.voevent.ICECUBE_ASTROTRACK_BRONZE",
+        # AMON high-energy-starting-event and extremely-high-energy tracks —
+        # same point-localization path as the Gold/Bronze streams.
+        "gcn.classic.voevent.AMON_ICECUBE_EHE",
+        "gcn.classic.voevent.AMON_ICECUBE_HESE",
     ],
 }
 

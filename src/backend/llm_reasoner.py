@@ -19,11 +19,15 @@ import requests
 
 
 def _primary_model_id() -> str:
-    return os.getenv("PRIMARY_LLM", "gemini/gemini-1.5-flash")
+    # 1.5-flash (HTTP 404) and 2.0-flash (retired Mar 2026) are both dead.
+    # gemini-2.5-flash is GA, documented, and free-tier.  Overridable.
+    return os.getenv("PRIMARY_LLM", "gemini/gemini-2.5-flash")
 
 
 def _fallback_model_id() -> str:
-    return os.getenv("FALLBACK_LLM", "groq/llama3-70b-8192")
+    # llama-3.3-70b-versatile was shut down Aug 16, 2026 (free/dev tiers).
+    # Groq's Production-tier replacement is openai/gpt-oss-120b.
+    return os.getenv("FALLBACK_LLM", "groq/openai/gpt-oss-120b")
 
 
 def _build_reasoning_prompt(
@@ -113,16 +117,23 @@ def _call_litellm(model_id: str, prompt: str, api_key: str, timeout: int = 15) -
 
     # Fallback: direct HTTP to the provider
     if "gemini" in model_id:
-        return _call_gemini_rest(api_key, prompt, timeout)
+        return _call_gemini_rest(api_key, prompt, timeout, model_id)
     elif "groq" in model_id:
-        return _call_groq_rest(api_key, prompt, timeout)
+        return _call_groq_rest(api_key, prompt, timeout, model_id)
 
     raise RuntimeError(f"No invocation method available for model: {model_id}")
 
 
-def _call_gemini_rest(api_key: str, prompt: str, timeout: int) -> str:
+def _model_name(model_id: str) -> str:
+    """Strip the litellm provider prefix (``gemini/``, ``groq/``, ``google/``)."""
+    name = (model_id or "").split("/", 1)[-1].strip()
+    return name or model_id
+
+
+def _call_gemini_rest(api_key: str, prompt: str, timeout: int, model_id: str = "") -> str:
     """Direct Google AI Studio REST call for Gemini models."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    model = _model_name(model_id) or "gemini-2.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 256},
@@ -133,12 +144,12 @@ def _call_gemini_rest(api_key: str, prompt: str, timeout: int) -> str:
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
-def _call_groq_rest(api_key: str, prompt: str, timeout: int) -> str:
+def _call_groq_rest(api_key: str, prompt: str, timeout: int, model_id: str = "") -> str:
     """Direct Groq REST call for Llama 3."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
-        "model": "llama3-70b-8192",
+        "model": _model_name(model_id) or "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
         "max_tokens": 256,
@@ -162,9 +173,11 @@ def reason_about_event(
     Falls back gracefully if keys are missing or both models fail.
     """
     primary_id = _primary_model_id()
-    primary_key = os.getenv("GEMINI_API_KEY", "")
+    # Strip pasted keys: a trailing newline (copy-paste from dashboards)
+    # breaks the Authorization header and killed the Groq fallback in prod.
+    primary_key = os.getenv("GEMINI_API_KEY", "").strip()
     fallback_id = _fallback_model_id()
-    fallback_key = os.getenv("GROQ_API_KEY", "")
+    fallback_key = os.getenv("GROQ_API_KEY", "").strip()
 
     prompt = _build_reasoning_prompt(verdict, galaxies, weather, skymap_summary)
 

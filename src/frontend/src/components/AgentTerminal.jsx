@@ -67,7 +67,7 @@ const STATUS = {
   running: { glyph: '▸', cls: 'text-yellow-400 animate-pulse' },
   completed: { glyph: '✓', cls: 'text-green-400' },
   failed: { glyph: '✗', cls: 'text-red-400' },
-  skipped: { glyph: '✗', cls: 'text-red-400' },
+  skipped: { glyph: '○', cls: 'text-gray-400' },
 }
 
 // In-flow mission-log console: every backend step event rendered

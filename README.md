@@ -62,7 +62,7 @@ See [docs/architecture.md](docs/architecture.md) for the full system diagram.
 | Layer | Technology |
 |-------|-----------|
 | Agent SDK | Strands Agents 1.26.0 |
-| LLM | LiteLLM → Gemini 1.5 Flash (primary) / Groq Llama3-70B (fallback) |
+| LLM | LiteLLM → Gemini 2.5 Flash (primary) / Groq gpt-oss-120b (fallback) |
 | Backend | FastAPI, Python 3.11 |
 | Astronomy | astropy, astropy-healpix, numpy |
 | Weather | Open-Meteo API (keyless) |
@@ -146,13 +146,15 @@ docker run -p 8000:8000 kilonovascout
 | `GROQ_API_KEY` | For LLM failover | — | Groq Cloud API key ([free](https://console.groq.com/keys)) |
 | `GCN_KAFKA_CLIENT_ID` | For live alerts | — | NASA GCN Kafka client ID ([free](https://gcn.nasa.gov/quickstart)) |
 | `GCN_KAFKA_CLIENT_SECRET` | For live alerts | — | NASA GCN Kafka client secret |
-| `PRIMARY_LLM` | No | `gemini/gemini-1.5-flash` | Primary LLM model ID |
-| `FALLBACK_LLM` | No | `groq/llama3-70b-8192` | Fallback LLM model ID |
+| `PRIMARY_LLM` | No | `gemini/gemini-2.5-flash` | Primary LLM model ID (1.5/2.0-flash are retired) |
+| `FALLBACK_LLM` | No | `groq/openai/gpt-oss-120b` | Fallback LLM model ID (llama-3.3-70b retired Aug 2026) |
 | `OBSERVATORY_NAME` | No | `Palomar` | Observatory name |
 | `OBSERVATORY_LAT` | No | `33.356` | Observatory latitude (degrees) |
 | `OBSERVATORY_LON` | No | `-116.865` | Observatory longitude (degrees) |
 | `OBSERVATORY_ALT` | No | `1706` | Observatory altitude (meters) |
 | `ALERT_CLASSES` | No | `bns,grb,neutrino` | Live-watch event classes (comma-separated; also changeable in UI) |
+| `GRACEDB_POLL` | No | `false` | Opt-in live BNS polling via public GraceDB REST (works without Kafka/IPv6) |
+| `GRACEDB_POLL_MINUTES` | No | `15` | Poll interval in minutes (minimum 5) |
 | `PORT` | Do not set | `8000` | Render injects this automatically |
 
 **No keys needed for:** VizieR TAP (anonymous), Open-Meteo (keyless), bundled replay data (in repo), matplotlib (local Agg backend).

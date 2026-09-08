@@ -57,6 +57,28 @@ def _pnum(value) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
+def _cone_pixel_indices(ra_deg: float, dec_deg: float, radius_deg: float, nside: int) -> np.ndarray:
+    """HEALPix cone search implemented manually with NumPy.
+
+    ``astropy_healpix`` ships no cone-search routine (verified through v2.x),
+    so this vectorizes the haversine separation over the pixel grid instead.
+    Callers cap nside at 256 (786k pixels ≈ 19 MB transient), keeping this
+    cheap on 512 MB instances.  Returns int64 nested pixel indices within
+    ``radius_deg`` of the center (possibly empty — callers fall back).
+    """
+    from astropy_healpix import healpix_to_lonlat, nside_to_npix
+    npix = int(nside_to_npix(nside))
+    ra_arr, dec_arr = healpix_to_lonlat(np.arange(npix, dtype=np.int64), nside, order="nested")
+    ra0 = math.radians(float(ra_deg))
+    dec0 = math.radians(float(dec_deg))
+    ra = np.radians(np.asarray(ra_arr.deg, dtype=np.float64))
+    dec = np.radians(np.asarray(dec_arr.deg, dtype=np.float64))
+    sin_d = np.sin((dec - dec0) / 2.0) ** 2 + np.cos(dec0) * np.cos(dec) * np.sin((ra - ra0) / 2.0) ** 2
+    sep = 2.0 * np.degrees(np.arcsin(np.sqrt(np.clip(sin_d, 0.0, 1.0))))
+    del ra_arr, dec_arr, ra, dec, sin_d
+    return np.nonzero(sep <= float(radius_deg))[0].astype(np.int64)
+
+
 def _load_scoring_weights() -> dict:
     """Load scoring weights from config/ with a robust fallback.
 
@@ -253,9 +275,7 @@ class KilonovaScoutTools:
 
         center = SkyCoord(ra=float(ra_deg) * u.deg, dec=float(dec_deg) * u.deg, frame="icrs")
         try:
-            idx = np.asarray(ah.healpix_cone_search(
-                center.ra, center.dec, radius=r90 * u.deg, nside=nside, order="nested"
-            ), dtype=np.int64)
+            idx = _cone_pixel_indices(float(ra_deg), float(dec_deg), r90, nside)
         except Exception as e:
             print(f"[SYS] point cone search failed ({e}); single-pixel fallback")
             idx = np.asarray([ah.lonlat_to_healpix(center.ra, center.dec, nside, order="nested")], dtype=np.int64)

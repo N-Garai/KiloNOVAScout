@@ -96,6 +96,22 @@ print("== topics/enablement ==")
 check("LVC topic -> bns", class_for_topic("gcn.classic.voevent.LVC_INITIAL") == "bns")
 check("GBM topic -> grb", class_for_topic("gcn.classic.voevent.FERMI_GBM_FIN_POS") == "grb")
 check("IceCube topic -> neutrino", class_for_topic("gcn.classic.voevent.ICECUBE_ASTROTRACK_GOLD") == "neutrino")
+check("Swift BAT position topic -> grb",
+      class_for_topic("gcn.classic.voevent.SWIFT_BAT_GRB_POS_ACK") == "grb")
+check("Swift XRT topic -> grb",
+      class_for_topic("gcn.classic.voevent.SWIFT_XRT_POSITION") == "grb")
+from backend.event_classes import CLASS_TOPICS
+check("no SWIFT_BAT_ALERT phantom topic",
+      not any("SWIFT_BAT_ALERT" in t for ts in CLASS_TOPICS.values() for t in ts))
+check("GBM ground refinement subscribed",
+      "gcn.classic.voevent.FERMI_GBM_GND_POS" in CLASS_TOPICS["grb"])
+check("AMON neutrino streams subscribed",
+      "gcn.classic.voevent.AMON_ICECUBE_EHE" in CLASS_TOPICS["neutrino"]
+      and "gcn.classic.voevent.AMON_ICECUBE_HESE" in CLASS_TOPICS["neutrino"])
+check("AMON EHE maps to neutrino",
+      class_for_topic("gcn.classic.voevent.AMON_ICECUBE_EHE") == "neutrino")
+check("GBM GND maps to grb",
+      class_for_topic("gcn.classic.voevent.FERMI_GBM_GND_POS") == "grb")
 check("unknown topic -> bns default", class_for_topic("gcn.classic.text.SOMETHING") == "bns")
 os.environ.pop("ALERT_CLASSES", None)
 check("env default all three", enabled_classes() == ["bns", "grb", "neutrino"], str(enabled_classes()))

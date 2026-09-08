@@ -249,6 +249,14 @@ class GcnListener:
                     for message in messages:
                         if message is None:
                             continue
+                        # Broker-level delivery errors arrive as messages with
+                        # error() set (official sample pattern) — never feed
+                        # those bytes to the XML parser.
+                        try:
+                            if message.error():
+                                continue
+                        except Exception:
+                            pass
                         payload = self._process_message(message)
                         if payload is not None:
                             try:

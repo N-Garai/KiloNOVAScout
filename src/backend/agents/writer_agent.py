@@ -317,7 +317,13 @@ _PRINT_CSS = """
                       border-radius: 10px; padding: 1px 8px; font-size: 0.8em;
                       font-family: monospace; margin-right: 6px; }
   footer { margin-top: 32px; font-size: 0.78em; color: #666; border-top: 1px solid #ccc; padding-top: 8px; }
-  @media print { body { padding: 0; } .no-print { display: none; } }
+  .titleblock { text-align: center; margin: 8px 0 26px; }
+  .tb-app { font-size: 0.8em; letter-spacing: 0.45em; color: #555; margin-bottom: 10px; }
+  .tb-title { font-size: 2em; margin: 0 0 10px; border: none; padding: 0; }
+  .tb-sub { font-size: 0.85em; color: #555; }
+  .math { text-align: center; font-size: 1.05em; background: #f7f7f9;
+          border: 1px solid #ddd; border-radius: 6px; padding: 12px 10px; margin: 12px 0; }
+  @media print { body { padding: 0; } }
 """
 
 
@@ -346,6 +352,55 @@ def _markdown_table_to_html(md_lines: List[str]) -> str:
         out.append("</tr>")
     out.append("</tbody></table>")
     return "\n".join(out)
+
+def _math_to_html(tex: str) -> str:
+    """Render our small LaTeX vocabulary as human-readable HTML.
+
+    Only the equation lines this writer emits are supported (localization
+    law + per-class scoring formula) — enough to read the report without a
+    TeX engine, without shipping MathJax to a print stylesheet.
+    """
+    import re
+    text = _html.escape(tex.strip().strip("$").strip())
+    text = text.replace("\\\\", "<br>")
+    for cmd, char in [
+        ("\\hat{n}", "n̂"), ("\\bar{X}", "X̄"),
+        ("\\mathrm{PROB}", "PROB"), ("\\mathcal{N}", "N"),
+        ("\\alpha", "α"), ("\\beta", "β"), ("\\gamma", "γ"),
+        ("\\delta", "δ"), ("\\epsilon", "ε"), ("\\zeta", "ζ"),
+        ("\\eta", "η"), ("\\theta", "θ"), ("\\kappa", "κ"),
+        ("\\mu", "μ"), ("\\sigma", "σ"),
+        ("\\cdot", "·"), ("\\sim", "∼"), ("\\leq", "≤"),
+        ("\\quad", " "), ("\\,", " "), ("\\;", " "),
+    ]:
+        text = text.replace(cmd, char)
+    text = re.sub(r"\\mathrm\{([^}]*)\}", r"\1", text)
+    text = re.sub(r"\\text\{([^}]*)\}", r"\1", text)
+    text = re.sub(r"\\mathcal\{([^}]*)\}", r"\1", text)
+    text = re.sub(r"_\{([^}]*)\}", r"<sub>\1</sub>", text)
+    text = re.sub(r"\^\{([^}]*)\}", r"<sup>\1</sup>", text)
+    text = re.sub(r"\^([0-9])", r"<sup>\1</sup>", text)
+    text = re.sub(r"\b([A-Za-z])_([A-Za-z])\b", r"\1<sub>\2</sub>", text)
+    return text
+
+
+def _title_block_html(record) -> str:
+    """Centered academic title block: app name, report title, event line."""
+    event = record.event or {}
+    event_class = event.get("event_class") or "bns"
+    label = METADATA.get(event_class, METADATA["bns"])["label"]
+    trigger = event.get("trigger_id") or event.get("ivorn") or record.run_id
+    when = event.get("event_time") or ""
+    return (
+        '<div class="titleblock">'
+        '<div class="tb-app">KILONOVASCOUT</div>'
+        f"<h1 class=\"tb-title\">{_html.escape(label)} Follow-Up Report</h1>"
+        f"<div class=\"tb-sub\">Event {_html.escape(str(trigger))}"
+        + (f" · {_html.escape(str(when))}" if when else "")
+        + " · Autonomous Multi-Messenger Targeting Pipeline</div>"
+        "</div>"
+    )
+
 
 def build_report_html(record, weights: Optional[Dict[str, float]] = None,
                       visualizations: Optional[Dict[str, str]] = None) -> str:
@@ -387,7 +442,7 @@ def build_report_html(record, weights: Optional[Dict[str, float]] = None,
                         f"{_html.escape(chr(10).join(block))}</code></pre>")
             continue
         if line.startswith("$$"):
-            body.append(f"<p class='math'><code>{_html.escape(line.strip('$'))}</code></p>")
+            body.append(f"<p class='math'>{_math_to_html(line)}</p>")
         elif line.startswith("#### "):
             body.append(f"<h4>{_md_inline(line[5:])}</h4>")
         elif line.startswith("### "):
@@ -418,8 +473,11 @@ def build_report_html(record, weights: Optional[Dict[str, float]] = None,
                 f"<figcaption style='font-size:0.8em;color:#555'>{_html.escape(name)}</figcaption></figure>"
             )
 
-    head = body[0] if body else ""
-    rest = chr(10).join(body[1:])
+    # The markdown's own "# ..." title is superseded by the academic title
+    # block above — drop it so the report does not print two titles.
+    if body and body[0].startswith("<h1>"):
+        body = body[1:]
+    rest = chr(10).join(body)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -428,10 +486,7 @@ def build_report_html(record, weights: Optional[Dict[str, float]] = None,
 <style>{_PRINT_CSS}</style>
 </head>
 <body>
-<div class="no-print" style="text-align:right;font-size:0.8em;color:#888;margin-bottom:8px">
-  KilonovaScout v3 — use your browser's Print dialog to save this report as PDF.
-</div>
-{head}
+{_title_block_html(record)}
 <div style="margin:10px 0">{badges}</div>
 {viz_html}
 {rest}

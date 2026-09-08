@@ -79,6 +79,29 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     // appearing to do nothing.
     wakeTimerRef.current = setTimeout(() => setWakingBackend(true), 10000)
 
+    // Wake-then-launch: Render free spins down after ~15 min idle, and
+    // firing the 3-minute pipeline at a half-booted server is what produced
+    // the 502s. Ping until the backend answers (up to ~90s) BEFORE launching.
+    setWakingBackend(true)
+    const warmDeadline = Date.now() + 90000
+    let warm = false
+    while (Date.now() < warmDeadline) {
+      try {
+        await axios.get('/api/ping', { timeout: 10000 })
+        warm = true
+        break
+      } catch {
+        await new Promise((r) => setTimeout(r, 5000))
+      }
+    }
+    setWakingBackend(false)
+    if (!warm) {
+      setRunError('Backend did not wake within 90 seconds — Render may be queuing the free instance. Wait a minute and launch again.')
+      if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
+      setLoading(false)
+      return
+    }
+
     // Render's proxy kills requests when the free instance restarts
     // mid-run (HTTP 502/503/504). Retry once automatically — the second
     // attempt usually lands on the freshly woken instance.
@@ -163,6 +186,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
         tool_name: step.tool_name,
         status: step.status,
         attempt: step.attempt,
+        started_at: step.started_at || '',
         duration_ms: step.duration_ms,
         error: step.error || '',
         input_summary: step.input_summary || '',
