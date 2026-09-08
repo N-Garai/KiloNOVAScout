@@ -30,9 +30,19 @@ def _fmt(value: Any, nd: int = 4, default: str = "—") -> str:
         return default
 
 
+_SUPERSCRIPT = str.maketrans("0123456789-+", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺")
+
+
 def _sci(value: Any, nd: int = 3, default: str = "—") -> str:
+    """Scientific notation in human-readable academic form: ``3.981 × 10⁸``.
+
+    Plain ``e+08`` strings are what made the report traces look like raw
+    code output; unicode superscripts read like a journal table in both
+    Markdown and print CSS, with no TeX engine required.
+    """
     try:
-        return f"{float(value):.{nd}e}"
+        mantissa, _, exp = f"{float(value):.{nd}e}".partition("e")
+        return f"{mantissa} × 10{str(int(exp)).translate(_SUPERSCRIPT)}"
     except (TypeError, ValueError):
         return default
 
@@ -61,12 +71,11 @@ def _candidate_trace_markdown(candidate: Dict[str, Any], event_class: str = "bns
                  "(localization probability density at the candidate pixel, "
                  "integrated over a 1 deg² follow-up field of view)")
     if "schechter" in active:
-        steps.append("**Schechter weight:** "
-                     f"w = (L_K/L_★)^α · e^(−L_K/L_★) with "
-                     f"L_K = {_sci(candidate.get('luminosity_k'))} L_☉, "
-                     f"L_★ = {_sci(weights.get('schechter_l_star'))} L_☉, "
-                     f"α = {_fmt(weights.get('schechter_alpha'), 1)} "
-                     f"→ w = {_fmt(terms.get('schechter'))}")
+        steps.append("**Schechter weight:** host luminosity "
+                     f"L_K = {_sci(candidate.get('luminosity_k'))} solar units against "
+                     f"the characteristic luminosity L★ = {_sci(weights.get('schechter_l_star'))} solar units, "
+                     f"with faint-end slope α = {_fmt(weights.get('schechter_alpha'), 1)}, "
+                     f"gives a luminosity weight w = {_fmt(terms.get('schechter'))}")
     steps.append("**Airmass (windowed):** "
                  f"X̄ = (1/N)·Σ sec(z_k) over a 2-hour, 12-sample window "
                  f"→ X̄ = {_fmt(terms.get('airmass'), 3)}")
@@ -80,10 +89,11 @@ def _candidate_trace_markdown(candidate: Dict[str, Any], event_class: str = "bns
                      f"B_GRB = {_fmt(terms.get('grb_boost'), 1)} "
                      "(3.0 when multi-messenger coincidence confirmed, else 0)")
     if "snr" in active:
-        steps.append("**SNR proxy:** "
-                     f"m = {_fmt(obs.get('apparent_mag'), 2)} at d_L → "
-                     f"SNR = {_fmt(terms.get('snr'), 3)} "
-                     "(10·10^(0.4·(17 − m)); 1-m telescope, 300 s)")
+        steps.append("**SNR proxy:** at this distance the kilonova would appear at "
+                     f"magnitude m = {_fmt(obs.get('apparent_mag'), 2)}, "
+                     f"for a signal-to-noise ratio of {_fmt(terms.get('snr'), 3)} "
+                     "(calibrated so magnitude 17 gives SNR 10, brighter sources "
+                     "scaling up 0.4 dex per magnitude; 1-m telescope, 300 s)")
     if "flux" in active:
         steps.append("**Burst flux proxy:** "
                      f"F = {_fmt(terms.get('flux'), 3)} "
@@ -118,7 +128,7 @@ def _data_sources_table(record) -> List[str]:
         "|---|---|---|",
         f"| Skymap | `{skymap_url}` | `{prov.get('skymap', 'unknown')}` |",
         "| Catalog | CDS VizieR TAP / bundled GLADE cache | `{prov.get('catalog', 'unknown')}` |",
-        "| Weather | Open-Meteo API (keyless) | `live` |",
+        f"| Weather | Open-Meteo API (keyless) | `{prov.get('weather', 'live')}` |",
         f"| Event | GCN ({record.source}) | `{prov.get('event', record.source)}` |",
         "",
     ]

@@ -15,6 +15,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const [reportHtml, setReportHtml] = useState('')
   const [provenance, setProvenance] = useState(null)
   const [showReport, setShowReport] = useState(false)
+  const [liveFound, setLiveFound] = useState(false)
+  const [liveNote, setLiveNote] = useState('')
   const [runError, setRunError] = useState('')
   const [wakingBackend, setWakingBackend] = useState(false)
   const [eventClasses, setEventClasses] = useState([])
@@ -32,7 +34,11 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     }
   }, [])
 
-  // Load supported trigger families + live-watch selection once.
+  const [watchTopics, setWatchTopics] = useState([])
+  const [poller, setPoller] = useState(null)
+
+  // Load supported trigger families + live-watch selection once; poller
+  // status tells the terminal whether background live discovery is armed.
   useEffect(() => {
     axios.get('/api/event-classes')
       .then(({ data }) => {
@@ -41,6 +47,12 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           setEnabledClasses(data.enabled)
           if (!data.enabled.includes(simClass)) setSimClass(data.enabled[0])
         }
+        if (Array.isArray(data.topics)) setWatchTopics(data.topics)
+      })
+      .catch(() => {})
+    axios.get('/api/ping')
+      .then(({ data }) => {
+        if (data && data.gracedb_poll) setPoller(data.gracedb_poll)
       })
       .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -68,7 +80,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const simulateEvent = async () => {
     setLoading(true)
     setRunError('')
-    setWakingBackend(false)
+    setLiveFound(false)
+    setLiveNote('')
     setExecutionTraces([])
     setCandidates([])
     setAlertData(null)
@@ -137,6 +150,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       setSource(data.alert?.source || 'mock')
       setLlmRationale(data.llm_rationale || '')
       setProvenance(data.provenance || null) // v3 data-source attribution badge (M4.4)
+      setLiveFound(!!data.live_trigger_found)
+      setLiveNote(data.live_check_note || '')
       setReportMarkdown('')
       setReportHtml('')
 
@@ -161,6 +176,19 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
         setRunError('Request timed out — the free-tier backend may still be waking up or the pipeline exceeded 3 minutes (auto-retried once). Wait a minute and launch again.')
       } else if (error?.request && !error?.response) {
         setRunError('Could not reach the backend. If it just woke from sleep, wait ~60 seconds and launch again.')
+      } else if (status === 429) {
+        const d = error?.response?.data?.detail
+        const busyRun = d && typeof d === 'object' ? d.run_id : null
+        if (busyRun) {
+          // A run (live trigger or earlier demo) is already in flight:
+          // attach this tab to its live telemetry instead of erroring out.
+          setRunId(busyRun)
+          startEventStream(busyRun)
+          setLiveFound(false)
+          setLiveNote(`Pipeline busy — attached to the in-progress run ${busyRun}. Watch it stream below.`)
+        } else {
+          setRunError('Pipeline busy — another run is in progress. Wait for it to finish, then launch again.')
+        }
       } else if (status === 502 || status === 503 || status === 504) {
         setRunError(`Render restarted the backend mid-run (HTTP ${status}, auto-retried once). The instance should be warm now — press LAUNCH GCN ALERT again.`)
       } else if (status) {
@@ -397,6 +425,21 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
               <div className="font-mono text-xs text-gray-300">{runError}</div>
             </div>
           )}
+
+          {(liveFound || liveNote) && !loading && (
+            <div className={`mt-6 max-w-2xl mx-auto glass rounded-xl p-4 border text-left ${
+              liveFound ? 'border-green-400/40' : 'border-white/10'
+            }`}>
+              <div className={`font-cosmic text-sm mb-1 ${liveFound ? 'text-green-400' : 'text-gray-400'}`}>
+                {liveFound ? 'LIVE TRIGGER' : 'SKY CHECK'}
+              </div>
+              <div className="font-mono text-xs text-gray-300">
+                {liveFound
+                  ? liveNote
+                  : (liveNote || 'No live trigger pending — fallback simulation (mock packet, live catalog where reachable).')}
+              </div>
+            </div>
+          )}
         </motion.div>
 
         {/* Status indicator + source badge */}
@@ -460,6 +503,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           loading={loading}
           eventClass={alertData?.event_class || simClass}
           classLabel={alertData?.class_label || ''}
+          topic={alertData?.topic || ''}
+          watchTopics={watchTopics}
+          poller={poller}
         />
 
         {/* Alert data */}

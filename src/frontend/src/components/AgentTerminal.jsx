@@ -73,7 +73,8 @@ const STATUS = {
 // In-flow mission-log console: every backend step event rendered
 // chronologically — agent + tool, indented subagent retries, durations,
 // errors, and the live→fallback tier won by each data stage.
-export default function AgentTerminal({ traces = [], provenance = null, runId = '', source = 'mock', agentStatus = 'listening', loading = false, eventClass = 'bns', classLabel = '' }) {
+export default function AgentTerminal({ traces = [], provenance = null, runId = '', source = 'mock', agentStatus = 'listening', loading = false, eventClass = 'bns', classLabel = '', topic = '', watchTopics = [], poller = null }) {
+  const pollOn = !!(poller && poller.enabled)
   const [expanded, setExpanded] = useState(null)
   const bottomRef = useRef(null)
 
@@ -123,6 +124,14 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
         </div>
       </div>
 
+      {/* Signal path: which stream this trigger arrived on */}
+      {topic !== '' && (
+        <div className="px-4 py-2 border-b border-white/10 bg-black/20 font-mono text-[10px]">
+          <span className="text-gray-500 uppercase tracking-widest mr-2">signal:</span>
+          <span className="text-cosmic-cyan break-all">{topic}</span>
+        </div>
+      )}
+
       {/* Data-source strip (backend-attached provenance) */}
       {provenance && (
         <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-white/10 bg-black/20 font-mono text-[10px]">
@@ -135,6 +144,23 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
           ))}
         </div>
       )}
+
+      {/* Watch state: what the backend is listening to right now */}
+      <div
+        className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 border-b border-white/10 bg-black/20 font-mono text-[10px]"
+        title={watchTopics.length ? watchTopics.join('\n') : 'no topic list loaded yet'}
+      >
+        <span className="text-gray-500 uppercase tracking-widest">watching:</span>
+        <span className="text-gray-300">
+          kafka · {watchTopics.length ? `${watchTopics.length} classic topics` : 'topics unknown'}
+        </span>
+        <span className={pollOn ? 'text-green-400' : 'text-gray-500'}>
+          {pollOn ? '●' : '○'} gracedb poll{pollOn ? '' : ' off'}
+        </span>
+        {pollOn && poller.last_result && (
+          <span className="text-gray-500 truncate">last: {String(poller.last_result).slice(0, 80)}</span>
+        )}
+      </div>
 
       {/* Log body — deep-space backdrop (nebula wash + starfield + drift) */}
       <div className="relative font-mono text-xs max-h-[28rem] overflow-y-auto">

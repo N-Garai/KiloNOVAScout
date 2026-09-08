@@ -162,7 +162,10 @@ def poll_once(seen: Set[str], *, far_hz: float = FAR_PER_YEAR_HZ,
             fresh.append({"superevent_id": sid, "far": se.get("far"),
                           "t_0": se.get("t_0"), "reason": reason})
     if len(seen) > SEEN_CAP:
-        seen = set(list(seen)[-SEEN_CAP:])
+        # In-place trim so a shared seen-set keeps its identity for other
+        # holders (poller thread + launch-time check).
+        for sid in list(seen)[:-SEEN_CAP]:
+            seen.discard(sid)
 
     payloads: List[Dict[str, Any]] = []
     for cand in fresh:
@@ -213,14 +216,22 @@ def build_live_payload(voevent_xml: bytes, superevent_id: str,
 
 def start_poller(get_handler: Callable[[], Any], loop: asyncio.AbstractEventLoop,
                  state: Dict[str, Any], interval_min: float = 15.0,
-                 far_hz: float = FAR_PER_YEAR_HZ) -> threading.Event:
+                 far_hz: float = FAR_PER_YEAR_HZ,
+                 shared_seen: Optional[Set[str]] = None,
+                 is_busy: Optional[Callable[[], bool]] = None) -> threading.Event:
     """Start the background poll thread (daemon). Returns a stop event.
 
     ``get_handler`` is resolved fresh on every trigger so agent recreations
     (e.g. observatory updates) never leave the poller calling a stale agent.
+    ``shared_seen`` lets the launch-time live check share the fired-set, so a
+    trigger fired by a button press is never re-fired by the thread (or vice
+    versa).  When omitted, an internal set is used.
+    ``is_busy`` (when given) defers a trigger instead of stacking a second
+    pipeline run onto a contended agent — the id is dropped from ``seen`` so
+    the next cycle retries it.
     """
     stop = threading.Event()
-    seen: Set[str] = set()
+    seen: Set[str] = shared_seen if shared_seen is not None else set()
     first = True
 
     def _run() -> None:
@@ -239,6 +250,12 @@ def start_poller(get_handler: Callable[[], Any], loop: asyncio.AbstractEventLoop
                     payloads, seen = poll_once(seen, far_hz=far_hz)
                     if payloads:
                         for p in payloads:
+                            if is_busy is not None and is_busy():
+                                seen.discard(p["superevent_id"])
+                                state.update({"last_check": _utcnow(),
+                                              "last_result": f"{p['superevent_id']}: pipeline busy, retry next cycle"})
+                                print(f"[POLL] {p['superevent_id']}: pipeline busy — deferred")
+                                continue
                             live = build_live_payload(p["voevent_xml"], p["superevent_id"], p["skymap_url"])
                             if live is None:
                                 continue

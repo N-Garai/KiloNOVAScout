@@ -198,6 +198,12 @@ class KilonovaScoutTools:
             )
 
         # Parse real FITS bytes (live or replay — same code path).
+        # GraceDB serves *.fits.gz files as raw gzip bytes (urllib does not
+        # decode them); decompress on the gzip magic before Table.read, which
+        # otherwise fails with "Format could not be identified".
+        if fits_bytes[:2] == b"\x1f\x8b":
+            print("[SYS] live skymap is gzip-compressed; decompressing")
+            fits_bytes = gzip.decompress(fits_bytes)
         # float32 throughout: halves the transient peak vs float64 with no
         # science impact at these precisions.  BAYESTAR DISTMU/DISTSIGMA
         # legitimately contain inf/NaN in zero-probability pixels — the
@@ -380,7 +386,11 @@ class KilonovaScoutTools:
         span = min(5.0, max(1.0, math.sqrt(area) / 2.0))
         ra_span, dec_span = span, span
 
-        # Tier 1: live VizieR TAP query
+        # Tier 1: live VizieR TAP query.  The pool is deliberately wide
+        # (120 rows): TAP returns an arbitrary TOP N with no spatial ordering,
+        # so a narrow pool can drown the true host in background galaxies.  A
+        # cheap centroid pre-filter below restores recall before the expensive
+        # per-candidate astrometry runs.
         try:
             raw = query_glade_vizier_tap(
                 ra_min=ra_center - ra_span,
@@ -389,6 +399,7 @@ class KilonovaScoutTools:
                 dec_max=dec_center + dec_span,
                 dist_mean=dist_mean,
                 dist_std=dist_std,
+                limit=120,
             )
             if raw:
                 candidates_raw = raw
@@ -407,6 +418,34 @@ class KilonovaScoutTools:
         if not candidates_raw:
             candidates_raw = get_mock_galaxies()
             catalog_source = "mock"
+
+        # Recall guard: keep the 60 rows nearest the 90%-region centroid.
+        # Pure haversine, no network, no astropy — microseconds per row — so
+        # the costly windowed-airmass scoring loop stays bounded while a host
+        # sitting almost on top of the centroid can no longer be crowded out
+        # by an arbitrary TOP-N cut.
+        if len(candidates_raw) > 60:
+            rc = math.radians(ra_center)
+            dc = math.radians(dec_center)
+
+            def _centroid_sep(c: Dict[str, Any]) -> float:
+                """Great-circle distance (radians) to the 90% centroid, RA-wrap safe."""
+                try:
+                    ra = math.radians(float(c.get("ra", c.get("RAJ2000", 0)) or 0.0))
+                    dec = math.radians(float(c.get("dec", c.get("DEJ2000", 0)) or 0.0))
+                except (TypeError, ValueError):
+                    return float("inf")
+                dra = abs(ra - rc)
+                if dra > math.pi:
+                    dra = 2.0 * math.pi - dra
+                ddec = dec - dc
+                a = (math.sin(ddec / 2.0) ** 2
+                     + math.cos(dc) * math.cos(dec) * math.sin(dra / 2.0) ** 2)
+                return 2.0 * math.asin(min(1.0, math.sqrt(max(0.0, a))))
+
+            kept = sorted(candidates_raw, key=_centroid_sep)[:60]
+            print(f"[SYS] catalog pre-filter: {len(candidates_raw)} -> {len(kept)} nearest centroid")
+            candidates_raw = kept
 
         # Weather is fetched ONCE per run (TTL cache) and shared by the whole
         # scoring loop — never per-candidate network calls.

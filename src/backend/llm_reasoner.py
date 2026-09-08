@@ -207,25 +207,59 @@ def reason_about_event(
     )
 
 
+def _extract_json_object(raw: str) -> Optional[dict]:
+    """Extract the first balanced {...} JSON object from model output.
+
+    Models routinely wrap the answer in fences, preambles ("Here is..."),
+    or trailing commentary — all of which break a naive json.loads and used
+    to leak raw JSON into the dashboard rationale.  Brace-matching finds the
+    object regardless of surrounding prose (string-aware, so braces inside
+    quoted text don't unbalance the scan).
+    """
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    data = json.loads(raw[start:i + 1])
+                except (json.JSONDecodeError, ValueError):
+                    return None
+                return data if isinstance(data, dict) else None
+    return None
+
+
 def _parse_llm_response(raw: str) -> Tuple[str, str]:
     """Parse LLM JSON response into (decision, rationale)."""
-    raw = raw.strip()
-    # Strip markdown code fences if present
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-
-    try:
-        data = json.loads(raw)
+    raw = (raw or "").strip()
+    data = _extract_json_object(raw)
+    if data is not None:
         decision = str(data.get("decision", "ACCEPT")).upper()
-        rationale = str(data.get("rationale", ""))
+        rationale = str(data.get("rationale", "")).strip()
         if decision not in ("ACCEPT", "REJECT"):
             decision = "ACCEPT"
-        return decision, rationale
-    except (json.JSONDecodeError, AttributeError):
-        # LLM didn't return valid JSON — extract what we can
-        if "REJECT" in raw.upper():
-            return "REJECT", raw[:300]
-        return "ACCEPT", raw[:300]
+        if rationale:
+            return decision, rationale[:600]
+    # No parseable object — extract what we can, never raw JSON braces.
+    text = raw.strip().strip("`").strip()
+    if text.startswith("{"):
+        text = ""
+    if "REJECT" in text.upper():
+        return "REJECT", (text or "Trigger rejected by model.")[:300]
+    return "ACCEPT", (text or "Target candidates identified for follow-up.")[:300]

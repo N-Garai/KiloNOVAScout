@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import functools
 import gc
 import json
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,7 +43,7 @@ from ..models import (
     Voevent,
 )
 from ..event_classes import METADATA, evaluate_trigger, get_profile, harvest_params
-from ..run_registry import RunRegistry, normalize_priorities
+from ..run_registry import RunRegistry, claim_live_trigger, live_run_id, normalize_priorities, note_live_run
 from ..tools import KilonovaScoutTools
 from ..simulator.event_simulator import EventSimulator
 from ..llm_reasoner import reason_about_event
@@ -54,6 +56,57 @@ run_registry = RunRegistry()
 
 def _now_iso() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
+
+
+def _exclusive_run(fn):
+    """Serialize pipeline runs on the single global agent (and 512 MB RAM).
+
+    A second concurrent trigger — e.g. a poller-fired live event landing
+    mid-demo — gets a ``busy`` failure instead of interleaving shared
+    agent_state and doubling peak memory into an OOM kill.  Callers map
+    ``details["busy"]`` to HTTP 429 (API) or skip-and-retry (poller).
+    """
+    @functools.wraps(fn)
+    async def wrapper(self, *args, **kwargs):
+        if not self._run_lock.acquire(blocking=False):
+            return AgentOutput(
+                message="Pipeline busy with another run; try again shortly.",
+                details={"busy": True, "run_id": getattr(self.agent_state, "run_id", None)},
+                action_status="failure",
+            )
+        try:
+            return await fn(self, *args, **kwargs)
+        finally:
+            try:
+                self._run_lock.release()
+            except RuntimeError:
+                pass
+    return wrapper
+
+
+async def _attach_weather_tier(run_id: str) -> None:
+    """Record the weather data tier (live vs fallback) in provenance."""
+    try:
+        rec = await run_registry.get_record(run_id)
+        weather = rec.weather if rec and isinstance(rec.weather, dict) else {}
+        await run_registry.attach(run_id, provenance={"weather": weather.get("source") or "unknown"})
+    except Exception:
+        pass
+
+
+async def _notify_run_complete(run_id: str) -> None:
+    """Fire the outbound webhook for a finished run (24/7 alerting).
+
+    Never raises and never blocks the loop: network I/O runs in a worker
+    thread, and a missing ALERT_WEBHOOK_URL is a silent no-op.
+    """
+    try:
+        from ..notifier import maybe_notify
+        rec = await run_registry.get_record(run_id)
+        if rec is not None:
+            await asyncio.to_thread(maybe_notify, rec)
+    except Exception as exc:
+        print(f"[ALERT] notify wrapper failed ({exc})")
 
 
 def _log_mem(run_id: str, stage: str) -> None:
@@ -157,6 +210,7 @@ def _galaxy_to_dict(g: Galaxy) -> Dict[str, Any]:
 
 
 def _weather_to_dict(w: ObservatoryWeather) -> Dict[str, Any]:
+    seeing = getattr(w, "seeing_conditions", "") or ""
     return {
         "observatory_name": w.observatory_name,
         "latitude": w.latitude,
@@ -165,10 +219,13 @@ def _weather_to_dict(w: ObservatoryWeather) -> Dict[str, Any]:
         "seeing_conditions": w.seeing_conditions,
         "humidity_pct": w.humidity_pct,
         "dome_safe": w.dome_safe,
+        # Data tier, honestly labeled: the pipeline's safe-defaults path
+        # marks its snapshots as fallback-grade weather.
+        "source": "fallback" if "fallback" in seeing.lower() else "live",
     }
 
 
-def _serialize_event(voevent: Voevent) -> Dict[str, Any]:
+def _serialize_event(voevent: Voevent, topic: str = "") -> Dict[str, Any]:
     ww = voevent.wherewhen or {}
     event_class = ww.get("event_class") or "bns"
     return {
@@ -180,6 +237,7 @@ def _serialize_event(voevent: Voevent) -> Dict[str, Any]:
         "distance_mpc": ww.get("distance_mpc"),
         "confidence": ww.get("confidence"),
         "skymap_summary": ww.get("skymap_summary"),
+        "topic": topic,
         "event_class": event_class,
         "class_label": METADATA.get(event_class, METADATA["bns"])["label"],
         # Gate verdict fields are attached after ingest (see _run_dag).
@@ -262,14 +320,32 @@ class KilonovaScoutAgent(Agent):
         self._trace_callback = None
         # (step, tool_name, status, attempt, input, output, err, started_at, duration_ms)
         self._measured_steps: List[StepEvent] = []
+        self._run_lock = threading.Lock()
+
+    def is_busy(self) -> bool:
+        """True while a pipeline run holds the agent (for pollers/UI)."""
+        return self._run_lock.locked()
 
     def set_trace_callback(self, cb) -> None:
         self._trace_callback = cb
 
+    @_exclusive_run
     async def process_gcn_event(self, payload: GcnKafkaPayload) -> AgentOutput:
         """Live entry point: run the DAG with source='live'."""
-        event_summary = _serialize_event(payload.voevent)
+        superevent_id = SkymapUpdateTracker.superevent_id(payload.voevent.ivorn or "")
+        if not claim_live_trigger(superevent_id):
+            prior = live_run_id(superevent_id)
+            print(f"[AGENT] duplicate live trigger {superevent_id} skipped"
+                  + (f" (already ran as {prior})" if prior else ""))
+            return AgentOutput(
+                message=f"Live trigger {superevent_id} already ran; skipping duplicate.",
+                details={"duplicate": True, "superevent_id": superevent_id,
+                         "run_id": prior},
+                action_status="skipped",
+            )
+        event_summary = _serialize_event(payload.voevent, topic=payload.topic)
         run = await run_registry.create_run(source="live", event=event_summary)
+        note_live_run(superevent_id, run.run_id)
         self.agent_state.run_id = run.run_id
         self.agent_state.last_gcn_event = payload.voevent.ivorn
         self.agent_state.source = "live"
@@ -282,14 +358,22 @@ class KilonovaScoutAgent(Agent):
                 weather=_weather_to_dict(self.agent_state.observatory_weather) if self.agent_state.observatory_weather else None,
                 slew_script=self.agent_state.slew_script.script_content if self.agent_state.slew_script else None,
             )
+            await _attach_weather_tier(run.run_id)
+            await _notify_run_complete(run.run_id)
             return output
         except Exception as exc:
             await run_registry.finish_run(run.run_id, "failed", error=str(exc))
+            await _notify_run_complete(run.run_id)
             self.agent_state.status = "error"
             return AgentOutput(message=f"Pipeline error: {exc}", details={"error": str(exc)}, action_status="failure")
 
     async def handle_live_notice(self, payload: GcnKafkaPayload) -> None:
         """Callback for the GCN listener: process a live notice through the pipeline."""
+        # Test-role notices are drills, not sky: never spend telescope time
+        # (or a live run record) on them in 24/7 operation.
+        if (payload.voevent.role or "").lower() == "test":
+            print(f"[GCN] test-role notice {payload.voevent.ivorn} ignored (drill, not sky)")
+            return
         self.agent_state.source = "live"
         await self.process_gcn_event(payload)
 
@@ -302,10 +386,11 @@ class KilonovaScoutAgent(Agent):
             return AgentOutput(message="Slew initiated.", action_status="success")
         return AgentOutput(message="No pending script.", action_status="failure")
 
+    @_exclusive_run
     async def run_mock_event(self, event_class: str = "bns") -> AgentOutput:
         """Reproducible mock run for any supported event class."""
         payload = self.simulator.get_payload(event_class)
-        run = await run_registry.create_run(source="mock", event=_serialize_event(payload.voevent))
+        run = await run_registry.create_run(source="mock", event=_serialize_event(payload.voevent, topic=payload.topic))
         self.agent_state.run_id = run.run_id
         self.agent_state.last_gcn_event = payload.voevent.ivorn
         self.agent_state.source = "mock"
@@ -318,9 +403,12 @@ class KilonovaScoutAgent(Agent):
                 weather=_weather_to_dict(self.agent_state.observatory_weather) if self.agent_state.observatory_weather else None,
                 slew_script=self.agent_state.slew_script.script_content if self.agent_state.slew_script else None,
             )
+            await _attach_weather_tier(run.run_id)
+            await _notify_run_complete(run.run_id)
             return output
         except Exception as exc:
             await run_registry.finish_run(run.run_id, "failed", error=str(exc))
+            await _notify_run_complete(run.run_id)
             self.agent_state.status = "error"
             return AgentOutput(message=f"Mock pipeline error: {exc}", details={"error": str(exc)}, action_status="failure")
 

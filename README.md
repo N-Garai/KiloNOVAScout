@@ -155,6 +155,8 @@ docker run -p 8000:8000 kilonovascout
 | `ALERT_CLASSES` | No | `bns,grb,neutrino` | Live-watch event classes (comma-separated; also changeable in UI) |
 | `GRACEDB_POLL` | No | `false` | Opt-in live BNS polling via public GraceDB REST (works without Kafka/IPv6) |
 | `GRACEDB_POLL_MINUTES` | No | `15` | Poll interval in minutes (minimum 5) |
+| `ALERT_WEBHOOK_URL` | No | — | HTTPS endpoint receiving a JSON POST on every finished run (Discord/Slack webhook, ntfy.sh topic, PagerDuty) |
+| `ALERT_WEBHOOK_SECRET` | No | — | Optional Bearer token sent with webhook alerts |
 | `PORT` | Do not set | `8000` | Render injects this automatically |
 
 **No keys needed for:** VizieR TAP (anonymous), Open-Meteo (keyless), bundled replay data (in repo), matplotlib (local Agg backend).
@@ -168,11 +170,158 @@ docker run -p 8000:8000 kilonovascout
 
 The Dockerfile uses a multi-stage build: Python builder → Node.js frontend build → Python runtime. The compiled frontend is copied into the backend's static serving path.
 
+## Observatory Operations (24/7)
+
+This section is for astronomers and observatory staff who want KilonovaScout
+watching the sky unattended and waking a human on every cosmic event.
+
+### What "live" means here (read first)
+
+"Live" is tracked **per input**, never as a single claim. Every run carries
+provenance `{skymap, catalog, event, weather}` with values `live | replay |
+cached | synthetic | mock`, shown in the dashboard badge, the telemetry
+console, and the report header. A run can legitimately be a mock trigger
+with a live catalog and live weather — the UI always says which is which.
+The telemetry console additionally shows the exact signal path (the Kafka
+topic or poll source the trigger arrived on) and a watching strip with the
+currently subscribed topics and poller state, so there is never ambiguity
+about what the backend is listening to.
+
+| Input | Live source | Fallback chain | Needs |
+|-------|-------------|----------------|-------|
+| Trigger | NASA GCN Kafka (push) or GraceDB REST poller | Per-class replay packets (GW170817 / GBM_170817529 / IC170922A-like) | Kafka: credentials + IPv6 egress. Poller: plain HTTPS only |
+| Skymap | FITS download from the notice URL | Bundled `bayestar.fits.gz` → calibrated synthetic | HTTPS (or nothing) |
+| Catalog | CDS VizieR TAP (anonymous ADQL) | Bundled GLADE+ cache → deterministic mock rows | HTTPS (or nothing) |
+| Weather | Open-Meteo API (keyless) | Safe-default snapshot, labeled `fallback` | HTTPS (or nothing) |
+| Rationale | Gemini → Groq | Deterministic summary (always works, zero keys) | API keys (or nothing) |
+
+### Choosing a host
+
+Minimum: Python 3.11, ~1 GB RAM recommended (512 MB proven workable —
+watch the `[MEM] stage=… peak_rss=…MB` log lines; sustained readings above
+~450 MB mean the host is too small), negligible disk, outbound HTTPS.
+Kafka push additionally needs IPv6 egress to `kafka*.gcn.nasa.gov:9092`.
+
+- **Render Free**: fine for demos and opportunistic live coverage. Not true
+  24/7 — the platform sleeps idle services after ~15 minutes, one always-on
+  service consumes ~720 of the 750 monthly instance-hours, and Kafka is
+  unreachable (IPv6). Use it as a public dashboard, not a sentinel.
+- **Laptop / lab server / VPS with IPv6**: full operation, including Kafka
+  push. This is the recommended sentinel host. Same repo, same `.env` keys,
+  `python -u -m backend.main` (see Local Development). A minimal systemd
+  unit is provided below.
+
+### Kafka consumer setup
+
+1. Sign in at <https://gcn.nasa.gov/quickstart> and create a credential
+   with scope `gcn.nasa.gov/kafka-public-consumer` (selected by default).
+2. Format: **VOEvent** (the pipeline parses VOEvent XML only; JSON/Text/
+   Binary notices are dropped with a log line).
+3. Notice types: tick **Fermi**, **Swift**, **IceCube** (+AMON). Skip
+   Heartbeat (1 msg/sec flood), Circulars, and families without a pipeline
+   class (CHIME/DSA/EP/MAXI/SuperK/BOOM) — unknown topics default to the BNS
+   path, which would mislabel them. There is no LVK entry: LVK discontinued
+   VOEvent distribution in July 2026, so BNS live coverage comes from the
+   GraceDB poller instead.
+4. Set `GCN_KAFKA_CLIENT_ID` / `GCN_KAFKA_CLIENT_SECRET` in the environment
+   and (re)start. Healthy signs in the log: `Listening on N topics (...)`
+   with no follow-up `Subscribed topic not available` lines. `role="test"`
+   drill notices are deliberately ignored — they never spend telescope time.
+
+### GraceDB poller (Kafka-free live BNS coverage)
+
+Set `GRACEDB_POLL=true` (optionally `GRACEDB_POLL_MINUTES`, minimum 5).
+Every interval the poller asks public GraceDB — plain IPv4 HTTPS, no
+credentials — for new significant Production superevents (SIGNIF_LOCKED,
+FAR below threshold) and runs each through the full live pipeline. Guards:
+seen-set seeding (boot never replays history), retraction skipping, a
+central once-only claim registry (a superevent can never produce two live
+runs, whichever entrypoint fires first), and a pipeline busy-lock (a second
+concurrent run gets HTTP 429 instead of doubling peak memory into an OOM
+kill). Confirm via boot log (`GraceDB poller on …`) and
+`GET /api/ping` → `gracedb_poll.last_check` / `last_result`.
+
+### Getting woken up (alerting)
+
+The dashboard approval modal only works when a human is looking at it. For
+unattended operation, set `ALERT_WEBHOOK_URL` to any HTTPS endpoint that
+accepts a JSON POST. It fires on **every finished run, completed and
+failed** — a dead pipeline at 3am is exactly what must wake someone — with
+event class, gate verdict, top candidate + score, provenance, observatory
+and dome status, and the report path. Optional `ALERT_WEBHOOK_SECRET` is
+sent as a Bearer token. Delivery is best-effort (10 s timeout, failures
+logged, pipeline never blocked). Fastest zero-setup path: pick an unguessable topic name (it doubles as the
+password — no account exists) and point the URL at
+`https://ntfy.sh/<your-topic>`; install the phone app, subscribe to the same
+topic, and it buzzes on every run. ntfy targets automatically get a native
+message (title header, urgent priority when candidates exist) instead of a
+JSON blob, and no Bearer token is sent to public topics. Be explicit about
+what is *not*
+included: there is no built-in SMS/Telegram dispatch — `send_sms_alert`
+only logs. Wire your own relay behind the webhook for those channels.
+
+### The approval loop
+
+A run ends in one of two states. `target_acquired` ( skies clear, gate
+accepted) arms the human gate: the dashboard shows the approval modal and
+`APPROVE & EXECUTE` calls `POST /agent/approve-slew-script`, flipping the
+agent to `slewing`. `monitoring`/`weather_blocked` (dome unsafe or
+overcast) never asks — it logs, notifies via webhook, and waits. Rejecting
+is closing the modal: no approval, no slew, full audit trail retained.
+
+### Runbook
+
+```bash
+# Health (process alive, observatory, model IDs)
+/health
+# Liveness + poller state (cheap; safe to hit every minute)
+/api/ping
+# Latest run, candidates, provenance, rationale
+/api/latest-event
+# Step-event stream for a run (what the telemetry console shows)
+/api/runs/{run_id}/events
+# Observation report (Markdown + print-ready HTML + LaTeX)
+/api/runs/{run_id}/report
+```
+
+Watch the logs for `[MEM]` (memory per stage), `[POLL]` (poller cycles),
+`[ALERT]` (webhook deliveries), and `[GCN]` (Kafka state). Run history is
+in-memory and capped at 20 — export reports promptly; restarts lose
+history. Update by pulling and rebuilding; no migrations, no database.
+
+Minimal systemd unit for a lab server:
+
+```ini
+[Unit]
+Description=KilonovaScout targeting agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kilonova
+WorkingDirectory=/opt/KiloNOVAScout
+EnvironmentFile=/opt/KiloNOVAScout/.env
+Environment=PYTHONPATH=src
+ExecStart=/opt/KiloNOVAScout/.venv/bin/python -u -m backend.main
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Safety notes: keep `.env` (never committed) restricted to the service
+user; drill (`role="test"`) notices are ignored by design — validate the
+live path with `python scripts/check_live_path.py` instead; weather
+fallback snapshots are labeled and fail *open*, so flip `dome_safe`
+handling before this software is allowed near real dome hardware.
+
 ## Data Files
 
 | File | Description |
 |------|-------------|
-| `src/backend/data/bayestar.fits.gz` | GW170817 BAYESTAR skymap (flat HEALPix, PROB/DISTMU/DISTSIGMA) |
+| `src/backend/data/bayestar.fits.gz` | GW170817 BAYESTAR skymap, degraded to nside 256 for the 512 MB budget (exact nested coarsening; 90% area 31.16 deg² and distance 36.0 Mpc conserved — see `scripts/degrade_bayestar.py`) |
 | `src/backend/data/GW170817_initial.json` | Faithful VOEvent replay packet (real IVORN, trigger time) |
 | `src/backend/data/GW170817_region_glade.json` | 29 real GLADE+ galaxies from live VizieR TAP (NGC 4993 verified) |
 | `config/scoring_weights.json` | Full v3 scoring formula weights |
@@ -205,7 +354,17 @@ curl -X POST http://localhost:8000/api/simulate-event
 curl http://localhost:8000/health
 ```
 
-The system includes an integrated `EventSimulator` that loads a faithful GW170817 replay packet for reproducible end-to-end testing without waiting for real gravitational-wave detections.
+Acceptance checks (run before any deployment or demo):
+
+```bash
+python scripts/check_event_classes.py   # gates, scoring profiles, topics (offline)
+python scripts/check_llm_parse.py       # rationale extraction (offline)
+python scripts/check_notifier.py        # webhook payload + failure paths (offline)
+python scripts/check_gracedb_poller.py  # poller rules + live GraceDB discovery (network)
+python scripts/check_live_path.py       # full live pipeline on real S190425z (network, ~3 min)
+```
+
+The system includes an integrated `EventSimulator` that loads a faithful GW170817 replay packet for reproducible end-to-end testing without waiting for real gravitational-wave detections. `check_live_path.py` is the complement: it replays the real S190425z VOEvent and skymap through the production live entrypoint and asserts all-`live` provenance.
 
 ## License
 

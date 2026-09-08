@@ -55,34 +55,41 @@ def _parse_voevent_xml(xml_text: bytes, topic: str = "") -> Optional[Voevent]:
 
         root = _safe_parse(BytesIO(xml_text_bytes)).getroot()
 
-        # Namespace handling
-        ns = {"v": "http://www.ivoa.net/xml/VOEvent/v2.0"}
+        # Namespace handling: producers disagree on convention — O4 files put
+        # children in the VOEvent namespace (default or prefixed) while O3
+        # files use a prefixed root (voe:) with UNPREFIXED children.  Strip
+        # every namespace and search bare tags so both shapes parse
+        # identically (verified live against S230518h and S190425z).
+        for el in root.iter():
+            if isinstance(el.tag, str) and "}" in el.tag:
+                el.tag = el.tag.split("}", 1)[1]
+        ns: Dict[str, str] = {}
         role = root.get("role", "observation")
         ivorn = root.get("ivorn", "unknown")
 
         # Description
-        description_el = root.find(".//v:Description", ns)
+        description_el = root.find(".//Description")
         description = description_el.text if description_el is not None else ""
 
         # WhereWhen / Coords
         wherewhen: Dict[str, Any] = {}
-        t_el = root.find(".//v:ISOTime", ns)
+        t_el = root.find(".//ISOTime")
         if t_el is not None:
             wherewhen["event_time"] = t_el.text
 
         # Point position (GRB / neutrino notices): VOEvent v2.0 AstroCoords.
         # C1/C2 are RA/Dec in degrees by convention — honor the unit attr.
-        for coords in root.findall(".//v:AstroCoords", ns):
-            pos = coords.find("./v:Position2D/v:Value2", ns)
+        for coords in root.findall(".//AstroCoords"):
+            pos = coords.find("./Position2D/Value2")
             if pos is not None and "deg" in (pos.get("unit", "deg") or "deg").lower():
                 try:
-                    c1 = pos.find("v:C1", ns)
-                    c2 = pos.find("v:C2", ns)
+                    c1 = pos.find("C1")
+                    c2 = pos.find("C2")
                     wherewhen["ra_deg"] = float(c1.text)
                     wherewhen["dec_deg"] = float(c2.text)
                 except (TypeError, ValueError, AttributeError):
                     pass
-            err = coords.find("./v:Position2D/v:Error2Radius", ns)
+            err = coords.find("./Position2D/Error2Radius")
             if err is not None and err.text:
                 try:
                     wherewhen["error_radius_deg"] = float(err.text)
@@ -91,7 +98,7 @@ def _parse_voevent_xml(xml_text: bytes, topic: str = "") -> Optional[Voevent]:
 
         # Find skymap URL from Param with name containing 'skymap' or 'bayestar'
         what: List[Dict[str, Any]] = []
-        for param in root.findall(".//v:Param", ns):
+        for param in root.findall(".//Param"):
             name = param.get("name", "")
             value = param.get("value", "")
             if name and value:
@@ -101,7 +108,7 @@ def _parse_voevent_xml(xml_text: bytes, topic: str = "") -> Optional[Voevent]:
                     wherewhen["skymap_summary"] = {"url": value}
 
         # FAR / classifications from Group / Param
-        for param in root.findall(".//v:Param", ns):
+        for param in root.findall(".//Param"):
             name = param.get("name")
             value = param.get("value")
             if name == "FAR":

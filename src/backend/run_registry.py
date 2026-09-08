@@ -12,9 +12,10 @@ import asyncio
 import datetime
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .models import (
     AgentState,
@@ -30,6 +31,41 @@ from .models import (
 
 
 MAX_RUN_HISTORY = 20
+
+
+# Live-trigger claim registry: superevent IDs that already ran the live
+# pipeline, whichever entrypoint fired them (Kafka notice, GraceDB poller,
+# LAUNCH-time check).  Claiming is atomic; a second claim of the same id is
+# refused so one cosmic event can never produce two live runs.
+_live_claims: Set[str] = set()
+_live_claims_lock = threading.Lock()
+_live_run_ids: Dict[str, str] = {}
+
+
+def claim_live_trigger(superevent_id: str) -> bool:
+    """Atomically claim a live superevent. True on first claim, False if
+    this id already ran (caller must skip the duplicate run)."""
+    if not superevent_id:
+        return True
+    with _live_claims_lock:
+        if superevent_id in _live_claims:
+            return False
+        _live_claims.add(superevent_id)
+        return True
+
+
+def note_live_run(superevent_id: str, run_id: str) -> None:
+    """Record which run id served a claimed superevent (for reference)."""
+    if not superevent_id or not run_id:
+        return
+    with _live_claims_lock:
+        _live_run_ids[superevent_id] = run_id
+
+
+def live_run_id(superevent_id: str) -> Optional[str]:
+    """Return the run id that served a superevent, if any."""
+    with _live_claims_lock:
+        return _live_run_ids.get(superevent_id)
 
 
 @dataclass

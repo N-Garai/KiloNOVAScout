@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import axios from 'axios'
 import HeroSection from './components/HeroSection'
 import MissionSection from './components/MissionSection'
 import ArchitectureSection from './components/ArchitectureSection'
@@ -47,6 +48,21 @@ function App() {
 }
 
 function ApprovalModal({ onClose }) {
+  const [phase, setPhase] = useState('ask') // ask | sending | done | failed
+  const [resultMsg, setResultMsg] = useState('')
+
+  const approve = async () => {
+    setPhase('sending')
+    try {
+      const { data } = await axios.post('/agent/approve-slew-script', null, { timeout: 30000 })
+      setResultMsg(data?.message || 'Slew approved.')
+      setPhase('done')
+    } catch (err) {
+      setResultMsg(err?.response?.data?.detail || err?.message || 'Approval request failed.')
+      setPhase('failed')
+    }
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -110,19 +126,40 @@ function ApprovalModal({ onClose }) {
           </pre>
         </div>
 
+        {(phase === 'done' || phase === 'failed') && (
+          <div className={`rounded-lg p-4 mb-6 font-mono text-xs border ${
+            phase === 'done' ? 'border-green-400/40 bg-green-500/10 text-green-300' : 'border-red-400/40 bg-red-500/10 text-red-300'
+          }`}>
+            {phase === 'done' ? 'SLEW AUTHORIZED — ' : 'APPROVAL FAILED — '}{resultMsg}
+          </div>
+        )}
+
         <div className="flex gap-4">
-          <button
-            onClick={onClose}
-            className="flex-1 px-6 py-3 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold hover:opacity-90 transition-opacity"
-          >
-            APPROVE & EXECUTE
-          </button>
-          <button
-            onClick={onClose}
-            className="flex-1 px-6 py-3 border-2 border-gray-600 rounded-lg font-cosmic font-bold hover:border-gray-400 transition-colors"
-          >
-            REJECT
-          </button>
+          {phase === 'done' ? (
+            <button
+              onClick={onClose}
+              className="flex-1 px-6 py-3 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold hover:opacity-90 transition-opacity"
+            >
+              CLOSE
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={approve}
+                disabled={phase === 'sending'}
+                className="flex-1 px-6 py-3 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {phase === 'sending' ? 'SENDING…' : 'APPROVE & EXECUTE'}
+              </button>
+              <button
+                onClick={onClose}
+                disabled={phase === 'sending'}
+                className="flex-1 px-6 py-3 border-2 border-gray-600 rounded-lg font-cosmic font-bold hover:border-gray-400 transition-colors disabled:opacity-50"
+              >
+                REJECT
+              </button>
+            </>
+          )}
         </div>
       </motion.div>
     </motion.div>
