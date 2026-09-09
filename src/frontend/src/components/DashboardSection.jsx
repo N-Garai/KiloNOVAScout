@@ -50,6 +50,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   // The LAUNCH button and the terminal footer both read this, so a dead
   // socket can never again look like a finished run (or vice versa).
   const [streamState, setStreamState] = useState('idle')
+  const [lastRunBanner, setLastRunBanner] = useState(null)
 
   // Close EventSource + timers on unmount
   useEffect(() => {
@@ -118,9 +119,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     }
   }
 
-  // 24/7 review: on open — and every 30s while idle — adopt whatever run
-  // finished last (often a poller/Kafka-fired live run nobody clicked for).
-  // Never clobbers an in-flight user view.
+  // 24/7 review: banner, not auto-paint. Fresh load stays at LISTENING;
+  // a finished latest run appears as a one-click banner instead of
+  // overwriting the view (which caused "stuck where I left off").
   useEffect(() => {
     let alive = true
     const checkLatest = async () => {
@@ -128,8 +129,10 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       try {
         const { data } = await axios.get('/api/latest-event')
         if (!alive || loadingRef.current) return
-        if (data && data.run_id && data.run_id !== runIdRef.current) {
-          adoptFinishedRun(data)
+        if (data && data.run_id && data.finished_at && data.run_id !== runIdRef.current) {
+          setLastRunBanner(data)
+        } else if (!data || !data.run_id) {
+          setLastRunBanner(null)
         }
       } catch { /* backend asleep or no runs yet */ }
     }
@@ -226,6 +229,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     finishedRef.current = null
     if (esRef.current) esRef.current.close()
     if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+    setLastRunBanner(null)
     setStreamState('idle')
     setLoading(true)
     setRunError('')
@@ -548,6 +552,42 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             Listening to the live NASA GCN stream — triage fires on the latest trigger across every watched family.
             When the sky is quiet, the agent replays an archived event as a fallback simulation.
           </p>
+
+          {lastRunBanner && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="max-w-3xl mx-auto mb-6 glass rounded-xl border border-cosmic-cyan/30 p-4 flex flex-col sm:flex-row items-center gap-3"
+            >
+              <div className="flex-1 text-left min-w-0">
+                <div className="font-mono text-[11px] text-cosmic-cyan">
+                  Last run: {(lastRunBanner.event?.class_label || lastRunBanner.event?.event_class || 'event').toUpperCase()} · {lastRunBanner.status}
+                </div>
+                <div className="font-mono text-xs text-gray-300 truncate">
+                  {lastRunBanner.event?.trigger_id || lastRunBanner.event?.ivorn || lastRunBanner.run_id}
+                  {lastRunBanner.finished_at ? ` · ${new Date(lastRunBanner.finished_at).toLocaleString()}` : ''}
+                </div>
+              </div>
+              <div className="flex gap-2 shrink-0">
+                <button
+                  onClick={() => {
+                    const d = lastRunBanner
+                    setLastRunBanner(null)
+                    adoptFinishedRun(d)
+                  }}
+                  className="px-4 py-2 rounded-lg bg-cosmic-cyan text-black font-mono text-xs font-bold hover:opacity-90"
+                >
+                  Show
+                </button>
+                <button
+                  onClick={() => setLastRunBanner(null)}
+                  className="px-3 py-2 rounded-lg border border-white/10 font-mono text-xs text-gray-400 hover:text-white"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </motion.div>
+          )}
 
           {/* Cosmic events — one panel: pick the demo trigger (radio) and
               toggle live Kafka watch per family (persisted to backend). */}
