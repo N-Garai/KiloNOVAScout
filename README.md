@@ -286,6 +286,33 @@ wakes every 10 minutes to check the clock; SMTP failures are logged and
 retried the next day, never raised into the pipeline. Turn the whole thing
 off with `DIGEST_ENABLED=false` (the default).
 
+##### Getting the Gmail App Password (you don't invent it — Google generates it)
+
+1. Google Account → **Security** → turn on **2-Step Verification**
+   (required — the App passwords page won't appear without it).
+2. Same page → **App passwords** → pick any name (e.g. `KilonovaScout`) → **Generate**.
+3. Google displays a 16-letter code in four groups, like
+   `abcd efgh ijkl mnop`. That display *is* the password — copy it.
+4. Paste it into `DIGEST_SMTP_PASS` (Render env dashboard or the
+   Observatory settings card), with `DIGEST_SMTP_USER` set to your full
+   Gmail address. Spaces are fine — they are stripped automatically.
+
+Three facts worth knowing: it is **not** your login password and cannot log
+into your account anywhere; you can **revoke** it in one click without
+changing anything else; and if you lose it, just generate a fresh one —
+Google never shows it again.
+
+#### Configuring without redeploying (dashboard)
+
+Everything above is also editable live in the Observatory section's
+**Notification Settings** card — webhook URL, live-only toggle, digest
+switch and hour, SMTP host/port/user/password, sender, and recipients —
+no restart needed, changes apply to the next run/mail. Secrets are never
+echoed back (the API blanks them; blank resubmits keep stored values).
+Use **Send test digest now** (`POST /api/digest/send-now`) to prove mail
+delivery in seconds instead of waiting for 06:00 UTC; the result line tells
+you exactly what was sent or which setting is missing.
+
 ### The approval loop
 
 A run ends in one of two states. `target_acquired` ( skies clear, gate

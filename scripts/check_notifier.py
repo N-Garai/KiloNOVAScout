@@ -70,6 +70,8 @@ os.environ.pop("ALERT_WEBHOOK_URL", None)
 
 from backend.notifier import (
     build_digest_message, should_send_digest, send_digest_email,
+    get_setting, set_runtime_prefs, masked_snapshot, digest_status,
+    _RUNTIME_PREFS,
 )
 import datetime as _dt
 
@@ -103,6 +105,51 @@ check("digest disabled never sends",
 os.environ.pop("DIGEST_SMTP_HOST", None)
 check("digest without SMTP config skips cleanly",
       send_digest_email([rec()]) is False)
+
+from backend.notifier import _smtp_config
+os.environ.update({
+    "DIGEST_SMTP_HOST": "smtp.gmail.com",
+    "DIGEST_SMTP_USER": "you@gmail.com",
+    "DIGEST_SMTP_PASS": "abcd efgh ijkl mnop",
+    "DIGEST_TO": "obs@test.org",
+})
+check("grouped app password normalized to 16 letters",
+      _smtp_config()["password"] == "abcdefghijklmnop",
+      _smtp_config()["password"] if _smtp_config() else None)
+for k in ("DIGEST_SMTP_HOST", "DIGEST_SMTP_USER", "DIGEST_SMTP_PASS",
+          "DIGEST_TO"):
+    os.environ.pop(k, None)
+
+_RUNTIME_PREFS.clear()
+os.environ["ALERT_WEBHOOK_URL"] = "https://env.example/hook"
+check("env fallback when overlay empty",
+      get_setting("ALERT_WEBHOOK_URL") == "https://env.example/hook")
+set_runtime_prefs({"ALERT_WEBHOOK_URL": "https://ui.example/hook",
+                   "BOGUS_KEY": "ignored",
+                   "ALERT_WEBHOOK_SECRET": "***",
+                   "DIGEST_SMTP_PASS": ""})
+check("overlay overrides env",
+      get_setting("ALERT_WEBHOOK_URL") == "https://ui.example/hook")
+check("unknown keys ignored", "BOGUS_KEY" not in _RUNTIME_PREFS)
+snap = masked_snapshot()
+check("masked snapshot blanks secrets but keeps values",
+      snap["ALERT_WEBHOOK_SECRET"] == "" and snap["DIGEST_SMTP_PASS"] == ""
+      and snap["ALERT_WEBHOOK_URL"] == "https://ui.example/hook")
+check("masked stars never stored as secrets",
+      get_setting("ALERT_WEBHOOK_SECRET") == "")
+os.environ.pop("ALERT_WEBHOOK_URL", None)
+check("overlay survives env removal",
+      get_setting("ALERT_WEBHOOK_URL") == "https://ui.example/hook")
+set_runtime_prefs({"ALERT_WEBHOOK_SECRET": "real-secret-1"})
+check("non-empty secret stored",
+      get_setting("ALERT_WEBHOOK_SECRET") == "real-secret-1")
+check("masked snapshot still blanks it",
+      masked_snapshot()["ALERT_WEBHOOK_SECRET"] == "")
+_RUNTIME_PREFS.clear()
+
+st = digest_status()
+check("digest status exposes no secrets",
+      "real-secret-1" not in str(st) and set(st) >= {"enabled", "configured"})
 
 from backend.notifier import _build_request
 

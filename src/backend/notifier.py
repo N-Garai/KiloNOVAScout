@@ -33,6 +33,71 @@ def _get_dict_attr(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+# Runtime preference overlay: the dashboard settings form writes here so
+# operators can change notification behavior without a restart or redeploy.
+# Every read falls back to the environment (Render dashboard / .env), so
+# keys never touched in the UI behave exactly as before.
+_RUNTIME_PREFS: Dict[str, str] = {}
+
+# Config keys the UI may manage (secrets handled separately — see below).
+PREF_KEYS = (
+    "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_SECRET", "ALERT_LIVE_ONLY",
+    "DIGEST_ENABLED", "DIGEST_HOUR_UTC",
+    "DIGEST_SMTP_HOST", "DIGEST_SMTP_PORT", "DIGEST_SMTP_USER",
+    "DIGEST_SMTP_PASS", "DIGEST_FROM", "DIGEST_TO",
+)
+
+# Suffixes treated as secrets: never echoed back, only overwritten by
+# non-empty input (protects saved values from blank form resubmits).
+_SECRET_SUFFIXES = ("_SECRET", "_PASS", "_TOKEN", "_KEY")
+
+
+def _is_secret_key(key: str) -> bool:
+    return key.upper().endswith(_SECRET_SUFFIXES)
+
+
+def get_setting(key: str, default: str = "") -> str:
+    """Read a notification preference: runtime overlay first, env fallback."""
+    if key in _RUNTIME_PREFS:
+        return _RUNTIME_PREFS[key]
+    return (os.getenv(key, "") or "").strip() or default
+
+
+def set_runtime_prefs(mapping: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Store UI-submitted preferences (pure logic, unit-testable).
+
+    Secret keys update only on non-empty input so a masked echo-back
+    ("" or "***") can never wipe a saved credential.  All other known keys
+    update whenever present.  Unknown keys are ignored.  Returns the full
+    effective snapshot with secrets masked for safe display.
+    """
+    for key, value in (mapping or {}).items():
+        if key not in PREF_KEYS:
+            continue
+        text = "" if value is None else str(value).strip()
+        if _is_secret_key(key):
+            if text and text != "***":
+                _RUNTIME_PREFS[key] = text
+        else:
+            _RUNTIME_PREFS[key] = text
+    return masked_snapshot()
+
+
+def masked_snapshot() -> Dict[str, str]:
+    """Effective preferences with every secret blanked (safe for GET)."""
+    out: Dict[str, str] = {}
+    for key in PREF_KEYS:
+        if _is_secret_key(key):
+            out[key] = ""
+        else:
+            out[key] = get_setting(key)
+    return out
+
+
+def _live_only() -> bool:
+    return get_setting("ALERT_LIVE_ONLY").lower() in ("1", "true", "yes")
+
+
 def build_alert_payload(record: Any) -> Dict[str, Any]:
     """Build the provider-agnostic alert body from a finished run record.
 
@@ -133,7 +198,7 @@ def _build_request(url: str, payload: Dict[str, Any], secret: str) -> urllib.req
 
 
 def _live_only() -> bool:
-    return (os.getenv("ALERT_LIVE_ONLY", "") or "").strip().lower() in ("1", "true", "yes")
+    return get_setting("ALERT_LIVE_ONLY").lower() in ("1", "true", "yes")
 
 
 def maybe_notify(record: Any) -> bool:
@@ -142,14 +207,14 @@ def maybe_notify(record: Any) -> bool:
     With ALERT_LIVE_ONLY=true, mock/demo runs are skipped silently so the
     on-call human is woken only by genuine triggers.
     """
-    url = (os.getenv("ALERT_WEBHOOK_URL", "") or "").strip()
+    url = get_setting("ALERT_WEBHOOK_URL")
     if not url or record is None:
         return False
     if _live_only() and _get_dict_attr(record, "source") != "live":
         print(f"[ALERT] skipped mock run {_get_dict_attr(record, 'run_id')} (ALERT_LIVE_ONLY)")
         return False
     try:
-        secret = (os.getenv("ALERT_WEBHOOK_SECRET", "") or "").strip()
+        secret = get_setting("ALERT_WEBHOOK_SECRET")
         req = _build_request(url, build_alert_payload(record), secret)
         with urllib.request.urlopen(req, timeout=10) as resp:
             ok = 200 <= getattr(resp, "status", 200) < 300
@@ -163,14 +228,17 @@ def maybe_notify(record: Any) -> bool:
 
 def _smtp_config() -> Optional[Dict[str, Any]]:
     """Read digest SMTP settings; None when incompletely configured."""
-    host = (os.getenv("DIGEST_SMTP_HOST", "") or "").strip()
-    user = (os.getenv("DIGEST_SMTP_USER", "") or "").strip()
-    password = (os.getenv("DIGEST_SMTP_PASS", "") or "")
-    to_raw = (os.getenv("DIGEST_TO", "") or "").strip()
+    host = get_setting("DIGEST_SMTP_HOST")
+    user = get_setting("DIGEST_SMTP_USER")
+    # Google displays App Passwords grouped with spaces ("abcd efgh ijkl
+    # mnop"); SMTP login wants the bare 16 letters, so all whitespace is
+    # stripped. Real passwords never legitimately need surrounding space.
+    password = "".join(get_setting("DIGEST_SMTP_PASS").split())
+    to_raw = get_setting("DIGEST_TO")
     if not (host and user and password and to_raw):
         return None
     try:
-        port = int(os.getenv("DIGEST_SMTP_PORT", "465") or 465)
+        port = int(get_setting("DIGEST_SMTP_PORT", "465") or 465)
     except (TypeError, ValueError):
         port = 465
     recipients = [t.strip() for t in to_raw.replace(";", ",").split(",") if t.strip()]
@@ -178,7 +246,7 @@ def _smtp_config() -> Optional[Dict[str, Any]]:
         return None
     return {
         "host": host, "port": port, "user": user, "password": password,
-        "from_addr": (os.getenv("DIGEST_FROM", "") or "").strip() or user,
+        "from_addr": get_setting("DIGEST_FROM") or user,
         "to": recipients,
     }
 
@@ -268,9 +336,22 @@ def send_digest_email(records: List[Any]) -> bool:
 
 def _digest_hour() -> int:
     try:
-        return max(0, min(23, int(os.getenv("DIGEST_HOUR_UTC", "6") or 6)))
+        return max(0, min(23, int(get_setting("DIGEST_HOUR_UTC", "6") or 6)))
     except (TypeError, ValueError):
         return 6
+
+
+def digest_status() -> Dict[str, Any]:
+    """Operator-facing digest state (safe to expose: no secrets included)."""
+    cfg = _smtp_config()
+    return {
+        "enabled": get_setting("DIGEST_ENABLED").lower() in ("1", "true", "yes"),
+        "hour_utc": _digest_hour(),
+        "configured": cfg is not None,
+        "recipients": len(cfg["to"]) if cfg else 0,
+        "webhook_set": bool(get_setting("ALERT_WEBHOOK_URL")),
+        "live_only": _live_only(),
+    }
 
 
 def start_digest(fetch_recent: Callable[[float], List[Any]],
@@ -284,7 +365,7 @@ def start_digest(fetch_recent: Callable[[float], List[Any]],
     last_sent: Optional[str] = None
     while not stop_event.is_set():
         try:
-            enabled = (os.getenv("DIGEST_ENABLED", "") or "").strip().lower() in ("1", "true", "yes")
+            enabled = get_setting("DIGEST_ENABLED").lower() in ("1", "true", "yes")
             now = datetime.datetime.now(datetime.timezone.utc)
             if should_send_digest(now, last_sent, enabled, _digest_hour()):
                 records = fetch_recent(24.0) or []

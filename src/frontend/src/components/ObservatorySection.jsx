@@ -33,10 +33,41 @@ export default function ObservatorySection() {
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(false)
   const [saveError, setSaveError] = useState('')
+  // Notification preferences (mirrors ObservatoryConfig; secrets stay blank
+  // unless being set — the backend never echoes them back).
+  const [notify, setNotify] = useState({
+    alert_webhook_url: '', alert_webhook_secret: '', alert_live_only: false,
+    digest_enabled: false, digest_hour_utc: '6',
+    digest_smtp_host: '', digest_smtp_port: '465', digest_smtp_user: '',
+    digest_smtp_pass: '', digest_from: '', digest_to: '',
+  })
+  const [notifySaved, setNotifySaved] = useState(false)
+  const [notifyLoading, setNotifyLoading] = useState(false)
+  const [notifyError, setNotifyError] = useState('')
+  const [digestTest, setDigestTest] = useState('')
   const [mapZoom, setMapZoom] = useState(1)
   const ref = useRef(null)
   const mapWrapRef = useRef(null)
   const isInView = useInView(ref, { once: true, margin: '-100px' })
+
+  const applyNotifyFromConfig = (c) => {
+    if (!c) return
+    setNotify((prev) => ({
+      ...prev,
+      alert_webhook_url: c.alert_webhook_url ?? prev.alert_webhook_url,
+      alert_live_only: !!c.alert_live_only,
+      digest_enabled: !!c.digest_enabled,
+      digest_hour_utc: c.digest_hour_utc ?? prev.digest_hour_utc,
+      digest_smtp_host: c.digest_smtp_host ?? prev.digest_smtp_host,
+      digest_smtp_port: c.digest_smtp_port ?? prev.digest_smtp_port,
+      digest_smtp_user: c.digest_smtp_user ?? prev.digest_smtp_user,
+      digest_from: c.digest_from ?? prev.digest_from,
+      digest_to: c.digest_to ?? prev.digest_to,
+      // Secrets intentionally never populated (backend always blanks them).
+      alert_webhook_secret: '',
+      digest_smtp_pass: '',
+    }))
+  }
 
   // Fetch current config on mount
   useEffect(() => {
@@ -47,8 +78,10 @@ export default function ObservatorySection() {
         setPickedPos({ lat: c.lat, lon: c.lon })
         setObsName(c.name)
         setObsAlt(c.alt?.toString() || '1706')
+        applyNotifyFromConfig(c)
       })
       .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Click anywhere on the map to move the observatory marker there.
@@ -132,6 +165,56 @@ export default function ObservatorySection() {
       }
     }
     setLoading(false)
+  }
+
+  const setNotifyField = (key, value) => {
+    setNotify((prev) => ({ ...prev, [key]: value }))
+    setNotifySaved(false)
+  }
+
+  const handleNotifySave = async () => {
+    setNotifyLoading(true)
+    setNotifyError('')
+    setDigestTest('')
+    try {
+      const numOrUndef = (v) => (v === '' || v == null ? undefined : parseInt(v, 10));
+      const payload = {
+        name: obsName || 'Palomar Observatory',
+        lat: pickedPos.lat,
+        lon: pickedPos.lon,
+        alt: parseFloat(obsAlt) || 1706,
+        alert_webhook_url: notify.alert_webhook_url,
+        alert_webhook_secret: notify.alert_webhook_secret || undefined,
+        alert_live_only: !!notify.alert_live_only,
+        digest_enabled: !!notify.digest_enabled,
+        digest_hour_utc: numOrUndef(notify.digest_hour_utc),
+        digest_smtp_host: notify.digest_smtp_host,
+        digest_smtp_port: numOrUndef(notify.digest_smtp_port),
+        digest_smtp_user: notify.digest_smtp_user,
+        digest_smtp_pass: notify.digest_smtp_pass || undefined,
+        digest_from: notify.digest_from,
+        digest_to: notify.digest_to,
+      }
+      const res = await axios.put('/agent/config', payload, { timeout: 60000 })
+      setConfig(res.data)
+      applyNotifyFromConfig(res.data)
+      setNotifySaved(true)
+      setTimeout(() => setNotifySaved(false), 3000)
+    } catch (err) {
+      console.error('Failed to update notifications:', err)
+      setNotifyError(`Save failed (HTTP ${err?.response?.status || 'unknown'}). Retry.`)
+    }
+    setNotifyLoading(false)
+  }
+
+  const handleDigestTest = async () => {
+    setDigestTest('Sending test digest…')
+    try {
+      const { data } = await axios.post('/api/digest/send-now', null, { timeout: 45000 })
+      setDigestTest(data?.sent ? `Sent: ${data.message || ''}` : `Not sent: ${data?.message || 'check SMTP settings'}`)
+    } catch (err) {
+      setDigestTest(`Failed (HTTP ${err?.response?.status || 'unknown'}). Check backend logs.`)
+    }
   }
 
   return (
@@ -410,6 +493,241 @@ export default function ObservatorySection() {
             </p>
           </motion.div>
         </div>
+
+        {/* Notifications — who gets woken, and how. Secrets are never
+            echoed back: blank means "keep the saved value". */}
+        <motion.div
+          initial={{ opacity: 0, y: 40 }}
+          animate={isInView ? { opacity: 1, y: 0 } : {}}
+          transition={{ duration: 0.9, delay: 0.6 }}
+          className="glass rounded-2xl p-6 border border-cosmic-cyan/20 mt-8"
+        >
+          <h3 className="font-cosmic text-xl font-bold text-white mb-2">
+            Notification Settings
+          </h3>
+          <p className="font-mono text-[11px] text-gray-500 mb-6 leading-relaxed">
+            Per-run alerts fire on every finished pipeline; the daily digest
+            mails the last 24 h of runs with report links. Secrets are stored
+            server-side and never displayed back.
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
+            <div className="mb-5 md:col-span-2">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                Webhook URL (Discord / Slack / ntfy.sh topic)
+              </label>
+              <input
+                type="text"
+                value={notify.alert_webhook_url}
+                onChange={(e) => setNotifyField('alert_webhook_url', e.target.value)}
+                placeholder="https://ntfy.sh/my-unique-topic"
+                className="w-full bg-black/60 border border-cosmic-cyan/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-cyan/60 focus:ring-1 focus:ring-cosmic-cyan/30
+                           transition-all"
+              />
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                Webhook Secret (leave blank to keep)
+              </label>
+              <input
+                type="password"
+                value={notify.alert_webhook_secret}
+                onChange={(e) => setNotifyField('alert_webhook_secret', e.target.value)}
+                placeholder="saved — blank keeps current"
+                autoComplete="new-password"
+                className="w-full bg-black/60 border border-cosmic-cyan/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-cyan/60 focus:ring-1 focus:ring-cosmic-cyan/30
+                           transition-all"
+              />
+            </div>
+
+            <div className="mb-5 flex items-end pb-1">
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={!!notify.alert_live_only}
+                  onChange={(e) => setNotifyField('alert_live_only', e.target.checked)}
+                  className="w-4 h-4 accent-cyan-400"
+                />
+                <span className="font-mono text-xs text-gray-300">
+                  Alert only on genuine triggers <span className="text-gray-500">(skip mock/demo runs)</span>
+                </span>
+              </label>
+            </div>
+
+            <div className="md:col-span-2 border-t border-white/10 my-1" />
+
+            <div className="mb-5 flex items-end pb-1">
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={!!notify.digest_enabled}
+                  onChange={(e) => setNotifyField('digest_enabled', e.target.checked)}
+                  className="w-4 h-4 accent-fuchsia-400"
+                />
+                <span className="font-mono text-xs text-gray-300">
+                  Daily digest mail <span className="text-gray-500">(runs + report links, once per day)</span>
+                </span>
+              </label>
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                Digest Hour (UTC, 0–23)
+              </label>
+              <input
+                type="number" min="0" max="23"
+                value={notify.digest_hour_utc}
+                onChange={(e) => setNotifyField('digest_hour_utc', e.target.value)}
+                className="w-full bg-black/60 border border-cosmic-magenta/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-magenta/60 focus:ring-1 focus:ring-cosmic-magenta/30
+                           transition-all"
+              />
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                SMTP Host
+              </label>
+              <input
+                type="text"
+                value={notify.digest_smtp_host}
+                onChange={(e) => setNotifyField('digest_smtp_host', e.target.value)}
+                placeholder="smtp.gmail.com"
+                className="w-full bg-black/60 border border-cosmic-magenta/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-magenta/60 focus:ring-1 focus:ring-cosmic-magenta/30
+                           transition-all"
+              />
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                SMTP Port
+              </label>
+              <input
+                type="number"
+                value={notify.digest_smtp_port}
+                onChange={(e) => setNotifyField('digest_smtp_port', e.target.value)}
+                placeholder="465"
+                className="w-full bg-black/60 border border-cosmic-magenta/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-magenta/60 focus:ring-1 focus:ring-cosmic-magenta/30
+                           transition-all"
+              />
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                SMTP Username
+              </label>
+              <input
+                type="text"
+                value={notify.digest_smtp_user}
+                onChange={(e) => setNotifyField('digest_smtp_user', e.target.value)}
+                placeholder="you@gmail.com"
+                autoComplete="username"
+                className="w-full bg-black/60 border border-cosmic-magenta/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-magenta/60 focus:ring-1 focus:ring-cosmic-magenta/30
+                           transition-all"
+              />
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                SMTP Password <span className="text-gray-600">(leave blank to keep)</span>
+              </label>
+              <input
+                type="password"
+                value={notify.digest_smtp_pass}
+                onChange={(e) => setNotifyField('digest_smtp_pass', e.target.value)}
+                placeholder="saved — use an App Password for Gmail"
+                autoComplete="new-password"
+                className="w-full bg-black/60 border border-cosmic-magenta/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-magenta/60 focus:ring-1 focus:ring-cosmic-magenta/30
+                           transition-all"
+              />
+            </div>
+
+            <div className="mb-5">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                From Display
+              </label>
+              <input
+                type="text"
+                value={notify.digest_from}
+                onChange={(e) => setNotifyField('digest_from', e.target.value)}
+                placeholder="KilonovaScout"
+                className="w-full bg-black/60 border border-cosmic-magenta/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-magenta/60 focus:ring-1 focus:ring-cosmic-magenta/30
+                           transition-all"
+              />
+            </div>
+
+            <div className="mb-5 md:col-span-2">
+              <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+                Mail To (comma-separated for several observers)
+              </label>
+              <input
+                type="text"
+                value={notify.digest_to}
+                onChange={(e) => setNotifyField('digest_to', e.target.value)}
+                placeholder="observer@observatory.org"
+                className="w-full bg-black/60 border border-cosmic-magenta/20 rounded-lg px-4 py-2.5
+                           text-white font-mono text-sm placeholder-gray-600
+                           focus:outline-none focus:border-cosmic-magenta/60 focus:ring-1 focus:ring-cosmic-magenta/30
+                           transition-all"
+              />
+            </div>
+          </div>
+
+          {notifyError && (
+            <div className="mb-4 rounded-lg border border-red-400/40 bg-red-500/10 px-4 py-2.5 font-mono text-xs text-red-300">
+              {notifyError}
+            </div>
+          )}
+          {digestTest && (
+            <div className="mb-4 rounded-lg border border-white/10 bg-black/40 px-4 py-2.5 font-mono text-xs text-gray-300">
+              {digestTest}
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-3">
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={handleNotifySave}
+              disabled={notifyLoading}
+              className={`flex-1 py-3 rounded-lg font-cosmic font-bold text-sm tracking-wider
+                         transition-all duration-300 ${
+                           notifySaved
+                             ? 'bg-green-500/20 border border-green-400/40 text-green-400'
+                             : 'bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta text-black hover:opacity-90'
+                         } ${notifyLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              {notifyLoading ? 'SAVING...' : notifySaved ? '✓ NOTIFICATIONS SAVED' : 'SAVE NOTIFICATIONS'}
+            </motion.button>
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={handleDigestTest}
+              disabled={notifyLoading}
+              className="flex-1 py-3 rounded-lg font-cosmic font-bold text-sm tracking-wider
+                         border-2 border-cosmic-magenta/50 text-cosmic-magenta hover:bg-cosmic-magenta/10
+                         transition-all disabled:opacity-50"
+            >
+              SEND TEST DIGEST NOW
+            </motion.button>
+          </div>
+        </motion.div>
       </div>
     </section>
   )

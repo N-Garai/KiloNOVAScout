@@ -111,20 +111,19 @@ async def lifespan(app: FastAPI):
         logger.info("[startup] GCN listener scheduled (mock-only mode if no creds).")
     except Exception as e:
         logger.warning(f"[startup] GCN listener start failed (continuing): {e}")
-    # Daily digest mail (opt-in via DIGEST_ENABLED + SMTP settings). Runs in
-    # its own daemon thread; a dead mail server only logs, never blocks.
+    # Daily digest mailer: always scheduled, self-gating per cycle via
+    # notification prefs (env or dashboard). Idle cost is one timer wake
+    # every 10 minutes; a dead mail server only logs, never blocks.
     try:
         import threading as _threading
         from .notifier import start_digest
-        digest_enabled = (os.getenv("DIGEST_ENABLED", "") or "").strip().lower() in ("1", "true", "yes")
-        if digest_enabled:
-            digest_stop = _threading.Event()
-            app.state.digest_stopper = digest_stop
-            _threading.Thread(
-                target=start_digest,
-                args=(lambda hours: run_registry.recent_records(hours), digest_stop),
-                name="digest-mailer", daemon=True).start()
-            logger.info("[startup] Daily digest mailer on.")
+        digest_stop = _threading.Event()
+        app.state.digest_stopper = digest_stop
+        _threading.Thread(
+            target=start_digest,
+            args=(lambda hours: run_registry.recent_records(hours), digest_stop),
+            name="digest-mailer", daemon=True).start()
+        logger.info("[startup] Daily digest mailer scheduled (enable via DIGEST_ENABLED or dashboard).")
     except Exception as e:
         logger.warning(f"[startup] Digest mailer start failed (continuing): {e}")
     app.state.gracedb = {"enabled": False, "last_check": None, "last_result": "disabled"}
@@ -336,6 +335,38 @@ async def api_event_classes():
     }
 
 
+def _notification_prefs_response() -> dict:
+    """Masked notification prefs for GET (secrets always blanked)."""
+    try:
+        from .notifier import masked_snapshot
+        snap = masked_snapshot()
+    except Exception:
+        snap = {}
+
+    def _truthy(key: str) -> bool:
+        return str(snap.get(key, "") or "").lower() in ("1", "true", "yes")
+
+    def _pint(key: str, default: int) -> int:
+        try:
+            return int(str(snap.get(key) or default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "alert_webhook_url": snap.get("ALERT_WEBHOOK_URL", ""),
+        "alert_webhook_secret": "",
+        "alert_live_only": _truthy("ALERT_LIVE_ONLY"),
+        "digest_enabled": _truthy("DIGEST_ENABLED"),
+        "digest_hour_utc": max(0, min(23, _pint("DIGEST_HOUR_UTC", 6))),
+        "digest_smtp_host": snap.get("DIGEST_SMTP_HOST", ""),
+        "digest_smtp_port": _pint("DIGEST_SMTP_PORT", 465),
+        "digest_smtp_user": snap.get("DIGEST_SMTP_USER", ""),
+        "digest_smtp_pass": "",
+        "digest_from": snap.get("DIGEST_FROM", ""),
+        "digest_to": snap.get("DIGEST_TO", ""),
+    }
+
+
 @app.get("/agent/config")
 async def get_agent_config():
     return ObservatoryConfig(
@@ -344,6 +375,7 @@ async def get_agent_config():
         lon=OBSERVATORY_LON,
         alt=OBSERVATORY_ALT,
         alert_classes=list(ALERT_CLASSES),
+        **_notification_prefs_response(),
     )
 
 
@@ -375,6 +407,36 @@ async def update_agent_config(config: ObservatoryConfig):
             except Exception as exc:
                 logger.warning(f"[API] listener resubscribe skipped ({exc})")
             logger.info(f"[API] Alert classes updated: {ALERT_CLASSES}")
+
+    # Notification preferences: absent keys keep stored values; secrets
+    # overwrite only on non-empty input (see notifier.set_runtime_prefs).
+    try:
+        from .notifier import set_runtime_prefs
+        incoming: dict = {}
+        if config.alert_webhook_url is not None:
+            incoming["ALERT_WEBHOOK_URL"] = config.alert_webhook_url
+        if config.alert_webhook_secret is not None:
+            incoming["ALERT_WEBHOOK_SECRET"] = config.alert_webhook_secret
+        if config.alert_live_only is not None:
+            incoming["ALERT_LIVE_ONLY"] = "true" if config.alert_live_only else "false"
+        if config.digest_enabled is not None:
+            incoming["DIGEST_ENABLED"] = "true" if config.digest_enabled else "false"
+        if config.digest_hour_utc is not None:
+            incoming["DIGEST_HOUR_UTC"] = str(max(0, min(23, int(config.digest_hour_utc))))
+        for field, key in (("digest_smtp_host", "DIGEST_SMTP_HOST"),
+                           ("digest_smtp_port", "DIGEST_SMTP_PORT"),
+                           ("digest_smtp_user", "DIGEST_SMTP_USER"),
+                           ("digest_smtp_pass", "DIGEST_SMTP_PASS"),
+                           ("digest_from", "DIGEST_FROM"),
+                           ("digest_to", "DIGEST_TO")):
+            value = getattr(config, field, None)
+            if value is not None:
+                incoming[key] = str(value)
+        if incoming:
+            set_runtime_prefs(incoming)
+            logger.info("[API] Notification preferences updated (secrets redacted).")
+    except Exception as exc:
+        logger.warning(f"[API] notification prefs update skipped ({exc})")
 
     kilonova_tools = KilonovaScoutTools(
         observatory_name=OBSERVATORY_NAME,
@@ -408,6 +470,7 @@ async def update_agent_config(config: ObservatoryConfig):
         lon=OBSERVATORY_LON,
         alt=OBSERVATORY_ALT,
         alert_classes=list(ALERT_CLASSES),
+        **_notification_prefs_response(),
     )
 
 
@@ -765,12 +828,40 @@ async def api_ping():
     the instance stays warm during active viewing. Does zero pipeline work.
     """
     import datetime
+    try:
+        from .notifier import digest_status
+        notify_state = digest_status()
+    except Exception:
+        notify_state = {"enabled": False, "configured": False}
     return {
         "status": "ok",
         "observatory": OBSERVATORY_NAME,
         "time": datetime.datetime.utcnow().isoformat() + "Z",
         "gracedb_poll": dict(getattr(app.state, "gracedb", {"enabled": False})),
+        "notifications": notify_state,
     }
+
+
+@app.post("/api/digest/send-now")
+async def api_digest_send_now():
+    """Send the digest immediately (tests SMTP config without waiting for
+    the scheduled hour). Returns what was sent, or why not."""
+    try:
+        from .notifier import digest_status, send_digest_email
+        recs = await asyncio.to_thread(run_registry.recent_records, 24.0)
+        ok = await asyncio.to_thread(send_digest_email, recs)
+        state = digest_status()
+        if ok:
+            return {"sent": True, "recipients": state.get("recipients", 0),
+                    "runs": len(recs),
+                    "message": f"Digest sent ({len(recs)} run(s))."}
+        reason = ("SMTP not configured — set DIGEST_SMTP_HOST/USER/PASS/TO "
+                  "first." if not state.get("configured")
+                  else "SMTP send failed — check credentials/host and the [DIGEST] log lines.")
+        return {"sent": False, "recipients": 0, "runs": len(recs), "message": reason}
+    except Exception as exc:
+        logger.warning(f"[API] digest send-now failed ({exc})")
+        raise HTTPException(status_code=500, detail=f"Digest failed: {exc}")
 
 
 @app.get("/health")

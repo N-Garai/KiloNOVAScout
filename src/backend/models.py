@@ -140,6 +140,19 @@ class ObservatoryConfig(BaseModel):
     lon: float = Field(default=-116.865, description="Longitude in decimal degrees.")
     alt: float = Field(default=1706, description="Altitude in meters.")
     alert_classes: Optional[List[str]] = Field(default=None, description="Enabled live-watch event classes (bns, grb, neutrino).")
+    # Notification preferences (all optional; absent keys leave stored values
+    # untouched; secrets only overwrite on non-empty input).
+    alert_webhook_url: Optional[str] = Field(default=None, description="Webhook URL for run alerts.")
+    alert_webhook_secret: Optional[str] = Field(default=None, description="Bearer secret for webhook alerts.")
+    alert_live_only: Optional[bool] = Field(default=None, description="Notify only on genuine triggers.")
+    digest_enabled: Optional[bool] = Field(default=None, description="Send the daily digest mail.")
+    digest_hour_utc: Optional[int] = Field(default=None, description="UTC hour (0-23) for the digest.")
+    digest_smtp_host: Optional[str] = Field(default=None, description="Digest SMTP host.")
+    digest_smtp_port: Optional[int] = Field(default=None, description="Digest SMTP port.")
+    digest_smtp_user: Optional[str] = Field(default=None, description="Digest SMTP username.")
+    digest_smtp_pass: Optional[str] = Field(default=None, description="Digest SMTP password/app password.")
+    digest_from: Optional[str] = Field(default=None, description="Digest sender display.")
+    digest_to: Optional[str] = Field(default=None, description="Digest recipient address(es).")
 
 # --- Scoring Weights ---
 class ScoringWeights(BaseModel):
