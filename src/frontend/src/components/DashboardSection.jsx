@@ -303,7 +303,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             return
           }
         } catch {}
-        pollTimerRef.current = setTimeout(poll, 2500)
+        if (finishedRef.current !== rid) pollTimerRef.current = setTimeout(poll, 2500)
       }
       pollTimerRef.current = setTimeout(poll, 1000)
       finishTimerRef.current = setTimeout(() => {
@@ -347,7 +347,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                 return
               }
             } catch {}
-            pollTimerRef.current = setTimeout(busyPoll, 2500)
+            if (finishedRef.current !== busyRun) pollTimerRef.current = setTimeout(busyPoll, 2500)
           }
           pollTimerRef.current = setTimeout(busyPoll, 1000)
           finishTimerRef.current = setTimeout(() => {
