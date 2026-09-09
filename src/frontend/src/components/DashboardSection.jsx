@@ -303,9 +303,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             return
           }
         } catch {}
-        if (finishedRef.current !== rid) pollTimerRef.current = setTimeout(poll, 2500)
+        if (finishedRef.current !== rid) pollTimerRef.current = setTimeout(poll, 1500)
       }
-      pollTimerRef.current = setTimeout(poll, 1000)
+      pollTimerRef.current = setTimeout(poll, 800)
       finishTimerRef.current = setTimeout(() => {
         if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
         setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
@@ -347,9 +347,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                 return
               }
             } catch {}
-            if (finishedRef.current !== busyRun) pollTimerRef.current = setTimeout(busyPoll, 2500)
+            if (finishedRef.current !== busyRun) pollTimerRef.current = setTimeout(busyPoll, 1500)
           }
-          pollTimerRef.current = setTimeout(busyPoll, 1000)
+          pollTimerRef.current = setTimeout(busyPoll, 800)
           finishTimerRef.current = setTimeout(() => {
             if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
             setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')

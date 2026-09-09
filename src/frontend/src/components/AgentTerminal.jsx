@@ -78,6 +78,7 @@ const STATUS = {
 // errors, and the live→fallback tier won by each data stage.
 export default function AgentTerminal({ traces = [], provenance = null, runId = '', source = 'mock', agentStatus = 'listening', loading = false, eventClass = 'bns', classLabel = '', topic = '', watchTopics = [], poller = null, streamState = 'idle' }) {
   const pollOn = !!(poller && poller.enabled)
+  const isRunning = agentStatus === 'processing'
   const [expanded, setExpanded] = useState(null)
   const bottomRef = useRef(null)
 
@@ -280,14 +281,17 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
         </div>
       </div>
 
-      {/* Status bar */}
+      {/* Status bar — never say "closed" while the pipeline is still running;
+          that single line is what made PROCESSING look finished. */}
       <div className="px-4 py-2 border-t border-white/10 bg-black/40 font-mono text-[10px] text-gray-600 flex items-center gap-3">
         <span>{traces.length} events</span>
-        {streamState === 'live' && <span className="text-yellow-400 animate-pulse">● streaming…</span>}
-        {streamState === 'reconnecting' && <span className="text-orange-400 animate-pulse">● reconnecting…</span>}
-        {streamState === 'closed' && traces.length > 0 && <span className="text-green-500">● stream closed</span>}
-        {streamState === 'idle' && traces.length === 0 && <span>awaiting launch — press LAUNCH above</span>}
-        <span className="ml-auto hidden sm:inline">backend: /api/runs/:id/events (SSE)</span>
+        {isRunning && <span className="text-yellow-400 animate-pulse">● live — agents working…</span>}
+        {!isRunning && streamState === 'live' && <span className="text-yellow-400 animate-pulse">● streaming…</span>}
+        {!isRunning && streamState === 'reconnecting' && <span className="text-orange-400 animate-pulse">● reconnecting…</span>}
+        {!isRunning && streamState === 'closed' && traces.length > 0 && <span className="text-green-500">● stream closed — run finished</span>}
+        {!isRunning && streamState === 'idle' && traces.length === 0 && <span>awaiting launch — press LAUNCH above</span>}
+        {isRunning && streamState === 'closed' && traces.length <= 1 && <span className="text-orange-400 animate-pulse">● polling for live steps…</span>}
+        <span className="ml-auto hidden sm:inline">backend: /api/runs/:id/events (SSE) + polling</span>
       </div>
     </motion.div>
   )
