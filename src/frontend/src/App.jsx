@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import axios from 'axios'
 import HeroSection from './components/HeroSection'
@@ -16,6 +16,21 @@ function App() {
   const [showApprovalModal, setShowApprovalModal] = useState(false)
   const [booted, setBooted] = useState(false)
   const handleBooted = useCallback(() => setBooted(true), [])
+
+  // Fresh load always starts at the top — browsers restore scroll on
+  // reload (history.scrollRestoration='auto'), which is why closing at
+  // Architecture and reopening landed there. Per-tab, not shared.
+  useEffect(() => {
+    if ('scrollRestoration' in window.history) {
+      window.history.scrollRestoration = 'manual'
+    }
+    window.scrollTo(0, 0)
+  }, [])
+  // After the loader covers the initial paint, keep the top anchored
+  // until the hero is visible — avoids a flash of restored position.
+  useEffect(() => {
+    if (booted) window.scrollTo(0, 0)
+  }, [booted])
 
   // Hold the Render instance warm while this tab is open (visible tabs only).
   useKeepAlive(booted)
