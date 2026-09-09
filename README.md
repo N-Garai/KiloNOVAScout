@@ -305,13 +305,38 @@ Google never shows it again.
 #### Configuring without redeploying (dashboard)
 
 Everything above is also editable live in the Observatory section's
-**Notification Settings** card — webhook URL, live-only toggle, digest
-switch and hour, SMTP host/port/user/password, sender, and recipients —
-no restart needed, changes apply to the next run/mail. Secrets are never
-echoed back (the API blanks them; blank resubmits keep stored values).
-Use **Send test digest now** (`POST /api/digest/send-now`) to prove mail
-delivery in seconds instead of waiting for 06:00 UTC; the result line tells
-you exactly what was sent or which setting is missing.
+**Notification Settings** card — no restart needed, changes apply to the
+next run/mail. Secrets are never echoed back (the API blanks them; blank
+resubmits keep stored values). Use **Send test digest now**
+(`POST /api/digest/send-now`) to prove mail delivery in seconds instead of
+waiting for 06:00 UTC; the result line tells you exactly what was sent or
+which setting is missing.
+
+Field by field, top to bottom as shown in the card:
+
+- **Webhook URL** — where per-run alerts go. Accepts a Discord/Slack
+  incoming-webhook URL, a PagerDuty Events endpoint, a custom relay, or an
+  `https://ntfy.sh/<your-topic>` topic for zero-setup phone push (pick an
+  unguessable topic name — it doubles as the password, no account exists).
+  Empty = alerts off.
+- **Webhook Secret** — optional Bearer token sent with JSON webhooks
+  (Discord/Slack/custom). Skipped automatically for ntfy.sh, where a wrong
+  token would fail a public topic. Blank always means "keep the saved
+  value."
+- **Alert only on genuine triggers** — checkbox. Off (default): every
+  finished run buzzes, demos included. On: mock/demo runs are logged but
+  never sent; only `live`-source triggers reach your phone.
+- **Daily digest mail** — checkbox master switch for the once-a-day summary.
+- **Digest Hour (UTC, 0–23)** — the hour the digest is sent (default 6).
+- **SMTP Host / Port** — your mail server, e.g. `smtp.gmail.com` / `465`
+  (implicit SSL; the sender always negotiates TLS).
+- **SMTP Username** — the full login name, e.g. `you@gmail.com`.
+- **SMTP Password** — the server password, or a Gmail **App Password** (see
+  above). Blank always means "keep the saved value."
+- **From Display** — the sender name shown on the mail, e.g.
+  `KilonovaScout`.
+- **Mail To** — one or more recipient addresses, comma-separated for
+  several observers (e.g. `observer@observatory.org, backup@home.net`).
 
 ### The approval loop
 
