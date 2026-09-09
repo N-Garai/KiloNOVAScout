@@ -111,6 +111,22 @@ async def lifespan(app: FastAPI):
         logger.info("[startup] GCN listener scheduled (mock-only mode if no creds).")
     except Exception as e:
         logger.warning(f"[startup] GCN listener start failed (continuing): {e}")
+    # Daily digest mail (opt-in via DIGEST_ENABLED + SMTP settings). Runs in
+    # its own daemon thread; a dead mail server only logs, never blocks.
+    try:
+        import threading as _threading
+        from .notifier import start_digest
+        digest_enabled = (os.getenv("DIGEST_ENABLED", "") or "").strip().lower() in ("1", "true", "yes")
+        if digest_enabled:
+            digest_stop = _threading.Event()
+            app.state.digest_stopper = digest_stop
+            _threading.Thread(
+                target=start_digest,
+                args=(lambda hours: run_registry.recent_records(hours), digest_stop),
+                name="digest-mailer", daemon=True).start()
+            logger.info("[startup] Daily digest mailer on.")
+    except Exception as e:
+        logger.warning(f"[startup] Digest mailer start failed (continuing): {e}")
     app.state.gracedb = {"enabled": False, "last_check": None, "last_result": "disabled"}
     if GRACEDB_POLL:
         try:
@@ -136,6 +152,9 @@ async def lifespan(app: FastAPI):
         stopper = getattr(app.state, "gracedb_stopper", None)
         if stopper is not None:
             stopper.set()
+        digest_stopper = getattr(app.state, "digest_stopper", None)
+        if digest_stopper is not None:
+            digest_stopper.set()
     except Exception:
         pass
 
@@ -202,13 +221,11 @@ def _galaxy_to_dict(g) -> dict:
 
 async def _build_simulate_response(agent_output, run_id: str) -> dict:
     details = agent_output.details if agent_output.details else {}
-    galaxies_raw = kilonova_agent.agent_state.candidate_galaxies or []
-    galaxies = [_galaxy_to_dict(g) for g in galaxies_raw]
     try:
         record = await run_registry.get_record(run_id)
-        run_event = (record.event or {}) if record else {}
     except Exception:
-        run_event = {}
+        record = None
+    run_event = (record.event or {}) if record else {}
     event_class = run_event.get("event_class") or "bns"
     event_type = {
         "bns": "Binary Neutron Star Merger",
@@ -216,6 +233,47 @@ async def _build_simulate_response(agent_output, run_id: str) -> dict:
         "neutrino": "High-Energy Neutrino Track",
     }.get(event_class, "Binary Neutron Star Merger")
 
+    # Prefer the immutable run record over shared agent state: an observatory
+    # save recreates the agent mid-run, and reading the fresh empty instance
+    # blanked the whole response (no candidates, no report buttons).
+    if record is not None and (record.candidates or record.status in ("completed", "failed", "skipped")):
+        weather = record.weather if isinstance(record.weather, dict) else {}
+        if record.status == "failed":
+            status = "error"
+        else:
+            status = _STATUS_MAP.get(run_event.get("agent_status") or "", "processing")
+        return {
+            "alert": {
+                "alert_id": run_event.get("trigger_id") or "GW170817",
+                "topic": run_event.get("topic") or "",
+                "event_type": event_type,
+                "ivorn": run_event.get("ivorn") or "GW170817",
+                "distance_mpc": 40.8,
+                "confidence": 90.0,
+                "observatory": weather.get("observatory_name") or OBSERVATORY_NAME,
+                "source": record.source or "mock",
+                "event_class": event_class,
+                "class_label": METADATA.get(event_class, METADATA["bns"])["label"],
+                "gate_status": run_event.get("gate_status"),
+                "gate_reason": run_event.get("gate_reason"),
+            },
+            "status": status,
+            "candidates": record.candidates or [],
+            "execution_traces": [_step_to_dict(s) for s in (record.steps or [])],
+            "message": agent_output.message,
+            "slew_script": record.slew_script or "",
+            "run_id": run_id,
+            "llm_rationale": record.llm_rationale or "",
+            # Same shape as the streaming record endpoint: provenance badge,
+            # visualizations list, and live-check flags stay available here.
+            "provenance": dict(record.provenance) if record.provenance else None,
+            "visualizations": list((record.visualizations or {}).keys()),
+            "live_trigger_found": (record.source == "live"),
+            "live_check_note": run_event.get("live_note") or "",
+        }
+
+    galaxies_raw = kilonova_agent.agent_state.candidate_galaxies or []
+    galaxies = [_galaxy_to_dict(g) for g in galaxies_raw]
     status = _STATUS_MAP.get(kilonova_agent.agent_state.status, "processing")
 
     return {

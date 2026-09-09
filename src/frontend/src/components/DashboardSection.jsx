@@ -3,6 +3,20 @@ import { motion, AnimatePresence } from 'framer-motion'
 import axios from 'axios'
 import AgentTerminal from './AgentTerminal'
 
+// One-line meaning for every agent status. MONITORING in particular is a
+// *finished* state (overcast / dome unsafe — nothing is running), which the
+// bare label never conveyed.
+const STATUS_INFO = {
+  listening: 'Idle — backend connected, no run active.',
+  processing: 'Run in progress — agents are working through the pipeline below.',
+  target_acquired: 'Target acquired — human approval required to slew.',
+  monitoring: 'Run finished — sky overcast or dome unsafe. Not observing; nothing is running.',
+  weather_blocked: 'Run finished — sky overcast or dome unsafe. Not observing; nothing is running.',
+  error: 'Run failed — see the error panel and backend logs.',
+  rejected: 'Trigger rejected by the ingestion filter — no follow-up.',
+  skipped: 'Step skipped — see the timeline for the reason.',
+}
+
 export default function DashboardSection({ agentStatus, setAgentStatus, onTargetAcquired }) {
   const [loading, setLoading] = useState(false)
   const [executionTraces, setExecutionTraces] = useState([])
@@ -25,16 +39,23 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const [watchSaving, setWatchSaving] = useState(false)
   const esRef = useRef(null)
   const finishTimerRef = useRef(null)
+  const retryTimerRef = useRef(null)
+  const finishedRef = useRef(null)
   const loadingRef = useRef(false)
   loadingRef.current = loading
   const runIdRef = useRef('')
   runIdRef.current = runId
+  // Stream connection state: idle | live | reconnecting | closed.
+  // The LAUNCH button and the terminal footer both read this, so a dead
+  // socket can never again look like a finished run (or vice versa).
+  const [streamState, setStreamState] = useState('idle')
 
   // Close EventSource + timers on unmount
   useEffect(() => {
     return () => {
       if (esRef.current) esRef.current.close()
       if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
     }
   }, [])
 
@@ -55,9 +76,16 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       rejected: 'rejected',
       skipped: 'skipped',
     }
+    // Adopt ONLY finished records: adopting a still-running run is what
+    // produced the stuck PROCESSING-with-empty-candidates state. A run
+    // without finished_at is by definition not done.
+    if (!data.finished_at) return
+    if (data.status !== 'completed' && data.status !== 'failed' && data.status !== 'skipped') return
     const status = data.status === 'failed'
       ? 'error'
       : (agentMap[ev.agent_status] || (data.status === 'completed' ? 'target_acquired' : 'processing'));
+    finishedRef.current = data.run_id
+    setStreamState('closed')
     setRunId(data.run_id)
     setAlertData({
       alert_id: ev.trigger_id || ev.ivorn || 'GW170817',
@@ -155,6 +183,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   // Fetch the finished run state (candidates, rationale, provenance) once
   // the SSE stream delivers the terminal run-finished event.
   const finishRun = async (rid) => {
+    if (finishedRef.current === rid) return
+    finishedRef.current = rid
+    setStreamState('closed')
     try {
       const { data } = await axios.get(`/api/runs/${rid}`)
       setAlertData(data.alert)
@@ -180,11 +211,19 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       setRunError('Run finished but its results could not be fetched. Reload and check the latest event.')
     } finally {
       if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
+      setStreamState('closed')
       setLoading(false)
     }
   }
 
   const simulateEvent = async () => {
+    // Double-click guard: the disabled attribute needs a render to take
+    // effect, so rapid clicks could otherwise launch overlapping 429s.
+    if (loadingRef.current) return
+    finishedRef.current = null
+    if (esRef.current) esRef.current.close()
+    if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+    setStreamState('idle')
     setLoading(true)
     setRunError('')
     setLiveFound(false)
@@ -301,14 +340,18 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     })
   }
 
-  const startEventStream = (runId, onFinish) => {
+  const MAX_SSE_RETRIES = 5
+
+  const startEventStream = (runId, onFinish, attempt = 0) => {
     if (!runId) return
     if (esRef.current) esRef.current.close()
+    if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
     let finished = false
     const evtSource = new EventSource(`/api/runs/${runId}/events`)
     evtSource.onmessage = (evt) => {
       try {
         const step = JSON.parse(evt.data)
+        setStreamState('live')
         mergeStep(step)
         // Terminal run-finished marker (emitted by finish_run): stop the
         // stream and pull the complete run state.
@@ -316,15 +359,46 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
         if (!finished && step.tool_name === 'run' && terminal) {
           finished = true
           evtSource.close()
+          setStreamState('closed')
           if (onFinish) onFinish()
           else setLoading(false)
         }
       } catch { /* ignore malformed frame */ }
     }
     evtSource.onerror = () => {
+      // Do NOT close-and-forget here (that single line caused the stuck
+      // "1 event, stream closed" state): verify the run still exists, then
+      // reconnect with backoff. Native EventSource auto-retry cannot do the
+      // 404 check, so the retry loop is manual.
       evtSource.close()
+      if (finished) return
+      axios.get(`/api/runs/${runId}`).then(
+        () => {
+          if (finished) return
+          if (attempt >= MAX_SSE_RETRIES) {
+            setStreamState('closed')
+            if (onFinish) onFinish() // backstop: persisted history still resolves
+            return
+          }
+          setStreamState('reconnecting')
+          retryTimerRef.current = setTimeout(() => {
+            startEventStream(runId, onFinish, attempt + 1)
+          }, 1500 * (attempt + 1))
+        },
+        () => {
+          // Run id unknown to the backend (e.g. restart wiped history):
+          // stop retrying and say so instead of hanging.
+          setStreamState('closed')
+          if (!finished) {
+            finished = true
+            setRunError('Lost contact with the run (backend restarted or history expired). Reload to check the latest event.')
+            setLoading(false)
+          }
+        }
+      )
     }
     esRef.current = evtSource
+    setStreamState('live')
   }
 
   const openReport = async () => {
@@ -482,10 +556,10 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           <button
             onClick={simulateEvent}
             disabled={loading}
-            className="px-12 py-4 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold text-lg hover:opacity-90 transition-opacity glow-cyan disabled:opacity-50"
+            className="px-12 py-4 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold text-lg hover:opacity-90 transition-opacity glow-cyan disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading
-              ? (wakingBackend ? 'WAKING BACKEND…' : 'PROCESSING…')
+              ? (wakingBackend ? 'WAKING BACKEND…' : (streamState === 'reconnecting' ? 'RECONNECTING…' : 'PROCESSING…'))
               : `LAUNCH ${((eventClasses.find((c) => c.key === simClass) || {}).label || simClass || 'GCN').toUpperCase()} ALERT`}
           </button>
 
@@ -534,9 +608,13 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                 agentStatus === 'target_acquired' ? 'text-green-400' :
                 agentStatus === 'weather_blocked' ? 'text-orange-400' :
                 agentStatus === 'rejected' ? 'text-red-400' :
+                agentStatus === 'skipped' ? 'text-gray-400' :
                 'text-cosmic-cyan'
               }`}>
                 {agentStatus.toUpperCase().replace('_', ' ')}
+              </div>
+              <div className="font-mono text-[11px] text-gray-500 mt-1">
+                {STATUS_INFO[agentStatus] || ''}
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -551,6 +629,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                 agentStatus === 'target_acquired' ? 'bg-green-400 animate-pulse' :
                 agentStatus === 'weather_blocked' ? 'bg-orange-400 animate-pulse' :
                 agentStatus === 'rejected' ? 'bg-red-400' :
+                agentStatus === 'skipped' ? 'bg-gray-400' :
                 'bg-cosmic-cyan'
               }`} />
             </div>
@@ -577,6 +656,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           source={source}
           agentStatus={agentStatus}
           loading={loading}
+          streamState={streamState}
           eventClass={alertData?.event_class || simClass}
           classLabel={alertData?.class_label || ''}
           topic={alertData?.topic || ''}

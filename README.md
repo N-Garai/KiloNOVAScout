@@ -156,7 +156,13 @@ docker run -p 8000:8000 kilonovascout
 | `GRACEDB_POLL` | No | `false` | Opt-in live BNS polling via public GraceDB REST (works without Kafka/IPv6) |
 | `GRACEDB_POLL_MINUTES` | No | `15` | Poll interval in minutes (minimum 5) |
 | `ALERT_WEBHOOK_URL` | No | — | HTTPS endpoint receiving a JSON POST on every finished run (Discord/Slack webhook, ntfy.sh topic, PagerDuty) |
-| `ALERT_WEBHOOK_SECRET` | No | — | Optional Bearer token sent with webhook alerts |
+| `ALERT_WEBHOOK_SECRET` | No | — | Optional Bearer token sent with webhook alerts (skipped for ntfy.sh) |
+| `ALERT_LIVE_ONLY` | No | `false` | Set `true` to notify only on genuine triggers (mock/demo runs skipped) |
+| `DIGEST_ENABLED` | No | `false` | Set `true` for the daily digest mail |
+| `DIGEST_HOUR_UTC` | No | `6` | Hour of day (UTC, 0–23) the digest is sent |
+| `DIGEST_SMTP_HOST` / `DIGEST_SMTP_PORT` | With digest | — | SMTP server, e.g. `smtp.gmail.com` / `465` (SSL) |
+| `DIGEST_SMTP_USER` / `DIGEST_SMTP_PASS` | With digest | — | SMTP credentials (Gmail: App Password, not login password) |
+| `DIGEST_FROM` / `DIGEST_TO` | With digest | — | Sender display and recipient address(es, comma-separated) |
 | `PORT` | Do not set | `8000` | Render injects this automatically |
 
 **No keys needed for:** VizieR TAP (anonymous), Open-Meteo (keyless), bundled replay data (in repo), matplotlib (local Agg backend).
@@ -258,10 +264,27 @@ password — no account exists) and point the URL at
 `https://ntfy.sh/<your-topic>`; install the phone app, subscribe to the same
 topic, and it buzzes on every run. ntfy targets automatically get a native
 message (title header, urgent priority when candidates exist) instead of a
-JSON blob, and no Bearer token is sent to public topics. Be explicit about
-what is *not*
+JSON blob, and no Bearer token is sent to public topics. Set
+`ALERT_LIVE_ONLY=true` to wake the on-call human **only on genuine
+triggers** — mock/demo runs are then skipped silently (logged, not sent).
+Be explicit about what is *not*
 included: there is no built-in SMS/Telegram dispatch — `send_sms_alert`
 only logs. Wire your own relay behind the webhook for those channels.
+
+#### Daily digest mail (opt-in)
+
+For a once-a-day summary instead of (or in addition to) per-run buzzes,
+set `DIGEST_ENABLED=true` plus the `DIGEST_SMTP_*` / `DIGEST_TO` settings
+(any SMTP account works; Gmail needs an App Password, not the login
+password). Once per day at `DIGEST_HOUR_UTC` (default 06:00 UTC) the agent
+mails every retained run from the last 24 hours with statuses, top
+candidates, and clickable report links (`RENDER_EXTERNAL_URL` is prepended
+when set, so phone taps land on the report). A quiet sky still sends —
+saying so explicitly — so an empty inbox day reads as "all quiet," never
+as "mailer broken." The scheduler is a single daemon thread that only
+wakes every 10 minutes to check the clock; SMTP failures are logged and
+retried the next day, never raised into the pipeline. Turn the whole thing
+off with `DIGEST_ENABLED=false` (the default).
 
 ### The approval loop
 

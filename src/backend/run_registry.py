@@ -146,6 +146,38 @@ class RunRegistry:
         buffer = self._runs.get(run_id)
         return buffer.record if buffer else None
 
+    def recent_records(self, hours: float = 24.0) -> List[RunRecord]:
+        """Retained run records started within the last `hours` (newest last).
+
+        Synchronous on purpose: the digest thread must not touch the event
+        loop.  Best-effort ordering; unparseable timestamps sort oldest.
+        Tolerates concurrent mutation by the loop thread (returns whatever
+        snapshot survives, never raises).
+        """
+        try:
+            cutoff = time.time() - float(hours) * 3600.0
+        except (TypeError, ValueError):
+            cutoff = time.time() - 24.0 * 3600.0
+        try:
+            buffers = list(self._runs.values())
+        except RuntimeError:
+            return []
+
+        def _ts(rec: RunRecord) -> float:
+            try:
+                # 'Z' suffix needs normalizing on Python < 3.11.
+                iso = str(rec.started_at)
+                if iso.endswith(("Z", "z")):
+                    iso = iso[:-1] + "+00:00"
+                return datetime.datetime.fromisoformat(iso).timestamp()
+            except (TypeError, ValueError):
+                return 0.0
+
+        return sorted(
+            (b.record for b in buffers if _ts(b.record) >= cutoff),
+            key=_ts,
+        )
+
     async def subscribe(self, run_id: str) -> asyncio.Queue:
         buffer = self._runs.get(run_id)
         if not buffer:

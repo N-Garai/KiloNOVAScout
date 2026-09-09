@@ -76,7 +76,7 @@ const STATUS = {
 // In-flow mission-log console: every backend step event rendered
 // chronologically — agent + tool, indented subagent retries, durations,
 // errors, and the live→fallback tier won by each data stage.
-export default function AgentTerminal({ traces = [], provenance = null, runId = '', source = 'mock', agentStatus = 'listening', loading = false, eventClass = 'bns', classLabel = '', topic = '', watchTopics = [], poller = null }) {
+export default function AgentTerminal({ traces = [], provenance = null, runId = '', source = 'mock', agentStatus = 'listening', loading = false, eventClass = 'bns', classLabel = '', topic = '', watchTopics = [], poller = null, streamState = 'idle' }) {
   const pollOn = !!(poller && poller.enabled)
   const [expanded, setExpanded] = useState(null)
   const bottomRef = useRef(null)
@@ -283,8 +283,10 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
       {/* Status bar */}
       <div className="px-4 py-2 border-t border-white/10 bg-black/40 font-mono text-[10px] text-gray-600 flex items-center gap-3">
         <span>{traces.length} events</span>
-        {loading && <span className="text-yellow-400 animate-pulse">● streaming…</span>}
-        {!loading && traces.length > 0 && <span className="text-green-500">● stream closed</span>}
+        {streamState === 'live' && <span className="text-yellow-400 animate-pulse">● streaming…</span>}
+        {streamState === 'reconnecting' && <span className="text-orange-400 animate-pulse">● reconnecting…</span>}
+        {streamState === 'closed' && traces.length > 0 && <span className="text-green-500">● stream closed</span>}
+        {streamState === 'idle' && traces.length === 0 && <span>awaiting launch — press LAUNCH above</span>}
         <span className="ml-auto hidden sm:inline">backend: /api/runs/:id/events (SSE)</span>
       </div>
     </motion.div>

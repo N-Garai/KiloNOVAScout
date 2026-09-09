@@ -17,8 +17,12 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import smtplib
+import threading
+import time
 import urllib.request
-from typing import Any, Dict, Optional
+from email.message import EmailMessage
+from typing import Any, Callable, Dict, List, Optional
 
 
 def _get_dict_attr(obj: Any, key: str, default: Any = None) -> Any:
@@ -128,10 +132,21 @@ def _build_request(url: str, payload: Dict[str, Any], secret: str) -> urllib.req
     )
 
 
+def _live_only() -> bool:
+    return (os.getenv("ALERT_LIVE_ONLY", "") or "").strip().lower() in ("1", "true", "yes")
+
+
 def maybe_notify(record: Any) -> bool:
-    """POST the alert if ALERT_WEBHOOK_URL is configured. Never raises."""
+    """POST the alert if ALERT_WEBHOOK_URL is configured. Never raises.
+
+    With ALERT_LIVE_ONLY=true, mock/demo runs are skipped silently so the
+    on-call human is woken only by genuine triggers.
+    """
     url = (os.getenv("ALERT_WEBHOOK_URL", "") or "").strip()
     if not url or record is None:
+        return False
+    if _live_only() and _get_dict_attr(record, "source") != "live":
+        print(f"[ALERT] skipped mock run {_get_dict_attr(record, 'run_id')} (ALERT_LIVE_ONLY)")
         return False
     try:
         secret = (os.getenv("ALERT_WEBHOOK_SECRET", "") or "").strip()
@@ -144,3 +159,137 @@ def maybe_notify(record: Any) -> bool:
     except Exception as exc:
         print(f"[ALERT] webhook failed ({exc})")
         return False
+
+
+def _smtp_config() -> Optional[Dict[str, Any]]:
+    """Read digest SMTP settings; None when incompletely configured."""
+    host = (os.getenv("DIGEST_SMTP_HOST", "") or "").strip()
+    user = (os.getenv("DIGEST_SMTP_USER", "") or "").strip()
+    password = (os.getenv("DIGEST_SMTP_PASS", "") or "")
+    to_raw = (os.getenv("DIGEST_TO", "") or "").strip()
+    if not (host and user and password and to_raw):
+        return None
+    try:
+        port = int(os.getenv("DIGEST_SMTP_PORT", "465") or 465)
+    except (TypeError, ValueError):
+        port = 465
+    recipients = [t.strip() for t in to_raw.replace(";", ",").split(",") if t.strip()]
+    if not recipients:
+        return None
+    return {
+        "host": host, "port": port, "user": user, "password": password,
+        "from_addr": (os.getenv("DIGEST_FROM", "") or "").strip() or user,
+        "to": recipients,
+    }
+
+
+def _report_link(run_id: Any) -> str:
+    base = (os.getenv("RENDER_EXTERNAL_URL", "") or "").strip().rstrip("/")
+    path = f"/api/runs/{run_id}/report"
+    return f"{base}{path}" if base else path
+
+
+def build_digest_message(records: List[Any], sender: str = "KilonovaScout") -> EmailMessage:
+    """Build the daily digest mail (pure constructor, unit-testable).
+
+    Lists every retained run from the window with status, top candidate and
+    report link; a quiet period still sends, explicitly saying so, so silence
+    is distinguishable from a broken scheduler.
+    """
+    lines = [
+        f"{sender} daily digest — {len(records)} run(s) in the last 24 hours",
+        "",
+    ]
+    if not records:
+        lines.append("Quiet sky: no pipeline runs were recorded in this window.")
+    for rec in records:
+        event = _get_dict_attr(rec, "event", {}) or {}
+        prov = _get_dict_attr(rec, "provenance", {}) or {}
+        cands = _get_dict_attr(rec, "candidates", []) or []
+        top = cands[0] if cands else {}
+        rid = _get_dict_attr(rec, "run_id", "?")
+        lines.append(
+            f"- [{_get_dict_attr(rec, 'status', '?')}] "
+            f"{event.get('class_label') or event.get('event_class') or 'event'} "
+            f"{event.get('trigger_id') or event.get('ivorn') or ''} "
+            f"(source={_get_dict_attr(rec, 'source', '?')}, "
+            f"skymap={prov.get('skymap', '?')}, catalog={prov.get('catalog', '?')})")
+        if top:
+            lines.append(
+                f"    top: {top.get('name')} "
+                f"(S={top.get('composite_score')}, {top.get('distance_mpc')} Mpc)")
+        lines.append(f"    report: {_report_link(rid)}")
+    lines += ["", "--", "Turn this off with DIGEST_ENABLED=false."]
+    msg = EmailMessage()
+    n_live = sum(1 for r in records if _get_dict_attr(r, "source") == "live")
+    msg["Subject"] = (f"[{sender}] daily digest: {len(records)} runs"
+                      + (f" ({n_live} live)" if n_live else " (all quiet/demo)"))
+    msg.set_content("\n".join(lines))
+    return msg
+
+
+def should_send_digest(now_utc: datetime.datetime, last_sent_iso: Optional[str],
+                       enabled: bool, hour: int) -> bool:
+    """True once per UTC day when the scheduled hour has passed (pure)."""
+    if not enabled:
+        return False
+    if now_utc.hour < hour:
+        return False
+    if not last_sent_iso:
+        return True
+    try:
+        last = datetime.datetime.fromisoformat(last_sent_iso)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return True
+    return last.date() < now_utc.date()
+
+
+def send_digest_email(records: List[Any]) -> bool:
+    """Send the digest if fully configured. Never raises."""
+    cfg = _smtp_config()
+    if not cfg:
+        print("[DIGEST] not configured (need DIGEST_SMTP_HOST/USER/PASS/TO); skipping")
+        return False
+    try:
+        msg = build_digest_message(records)
+        msg["From"] = cfg["from_addr"]
+        msg["To"] = ", ".join(cfg["to"])
+        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=20) as smtp:
+            smtp.login(cfg["user"], cfg["password"])
+            smtp.send_message(msg)
+        print(f"[DIGEST] sent to {len(cfg['to'])} recipient(s), {len(records)} run(s)")
+        return True
+    except Exception as exc:
+        print(f"[DIGEST] send failed ({exc})")
+        return False
+
+
+def _digest_hour() -> int:
+    try:
+        return max(0, min(23, int(os.getenv("DIGEST_HOUR_UTC", "6") or 6)))
+    except (TypeError, ValueError):
+        return 6
+
+
+def start_digest(fetch_recent: Callable[[float], List[Any]],
+                 stop_event: threading.Event) -> None:
+    """Daily digest scheduler loop (runs in its own daemon thread).
+
+    Wakes every 10 minutes; once per UTC day after DIGEST_HOUR_UTC it mails
+    the last 24 h of retained runs.  All failures are logged, never raised —
+    a dead mail server must not take down the agent.
+    """
+    last_sent: Optional[str] = None
+    while not stop_event.is_set():
+        try:
+            enabled = (os.getenv("DIGEST_ENABLED", "") or "").strip().lower() in ("1", "true", "yes")
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if should_send_digest(now, last_sent, enabled, _digest_hour()):
+                records = fetch_recent(24.0) or []
+                if send_digest_email(records):
+                    last_sent = now.isoformat()
+        except Exception as exc:
+            print(f"[DIGEST] cycle failed ({exc})")
+        stop_event.wait(600.0)
