@@ -58,7 +58,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       if (esRef.current) esRef.current.close()
       if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
     }
   }, [])
 
@@ -216,7 +216,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       setRunError('Run finished but its results could not be fetched. Reload and check the latest event.')
     } finally {
       if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
       setStreamState('closed')
       setLoading(false)
     }
@@ -280,21 +280,14 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       if (!rid) throw new Error('backend did not return a run id')
       setRunId(rid)
       startEventStream(rid, () => finishRun(rid))
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
-      pollTimerRef.current = setInterval(async () => {
-        if (finishedRef.current === rid) {
-          clearInterval(pollTimerRef.current)
-          return
-        }
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+      const poll = async () => {
+        if (finishedRef.current === rid) return
         try {
           const { data: rec } = await axios.get(`/api/runs/${rid}`)
-          // Incremental UI sync: even if SSE is dead, the polling record
-          // carries the full step history, candidates, and provenance.
           if (Array.isArray(rec.execution_traces) && rec.execution_traces.length) {
             rec.execution_traces.forEach(mergeStep)
           }
-          // Progressive sync: keep the dashboard in sync even when SSE is
-          // buffered. Each field is only promoted when the record has it.
           if (rec.candidates && rec.candidates.length) setCandidates(rec.candidates)
           if (rec.alert) setAlertData(rec.alert)
           if (rec.provenance) setProvenance(rec.provenance)
@@ -305,14 +298,16 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             if (s && s !== 'processing') setAgentStatus(s)
           }
           if (rec.finished_at && ['completed', 'failed', 'skipped'].includes(rec.status)) {
-            clearInterval(pollTimerRef.current)
             if (esRef.current) esRef.current.close()
             if (finishedRef.current !== rid) finishRun(rid)
+            return
           }
         } catch {}
-      }, 2500)
+        pollTimerRef.current = setTimeout(poll, 2500)
+      }
+      pollTimerRef.current = setTimeout(poll, 1000)
       finishTimerRef.current = setTimeout(() => {
-        if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
         setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
         setLoading(false)
       }, 5 * 60 * 1000)
@@ -334,12 +329,9 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           setLiveFound(false)
           setLiveNote(`Pipeline busy — attached to the in-progress run ${busyRun}. Watch it stream below.`)
           startEventStream(busyRun, () => finishRun(busyRun))
-          if (pollTimerRef.current) clearInterval(pollTimerRef.current)
-          pollTimerRef.current = setInterval(async () => {
-            if (finishedRef.current === busyRun) {
-              clearInterval(pollTimerRef.current)
-              return
-            }
+          if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+          const busyPoll = async () => {
+            if (finishedRef.current === busyRun) return
             try {
               const { data: rec } = await axios.get(`/api/runs/${busyRun}`)
               if (Array.isArray(rec.execution_traces) && rec.execution_traces.length) {
@@ -350,14 +342,16 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
               if (rec.provenance) setProvenance(rec.provenance)
               if (rec.llm_rationale) setLlmRationale(rec.llm_rationale)
               if (rec.finished_at && ['completed', 'failed', 'skipped'].includes(rec.status)) {
-                clearInterval(pollTimerRef.current)
                 if (esRef.current) esRef.current.close()
                 if (finishedRef.current !== busyRun) finishRun(busyRun)
+                return
               }
             } catch {}
-          }, 2500)
+            pollTimerRef.current = setTimeout(busyPoll, 2500)
+          }
+          pollTimerRef.current = setTimeout(busyPoll, 1000)
           finishTimerRef.current = setTimeout(() => {
-            if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+            if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
             setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
             setLoading(false)
           }, 5 * 60 * 1000)

@@ -271,6 +271,17 @@ Be explicit about what is *not*
 included: there is no built-in SMS/Telegram dispatch — `send_sms_alert`
 only logs. Wire your own relay behind the webhook for those channels.
 
+#### Per-observatory scope today — per-person inboxes as future work
+
+Today the **observatory location, alert webhook, digest, and the run
+history itself are single-tenant and global**: one `PUT /agent/config`
+overwrites one `_RUNTIME_PREFS` map and one `run_registry` that every
+browser tab shares. Two astronomers opening the same URL therefore see
+the **same** latest run and the **same** mail recipients — there is no
+per-user inbox. This is intentional for a single-dish demo. A future
+authenticated mode would scope `run_registry` + `_RUNTIME_PREFS` per
+account (or per API key) and add per-user digest preferences.
+
 #### Daily digest mail (opt-in)
 
 For a once-a-day summary instead of (or in addition to) per-run buzzes,

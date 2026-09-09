@@ -177,6 +177,10 @@ top of the v2 orchestrator:
 
 ## Future Enhancements
 
+- **Per-observer inboxes.** Today observatory location, webhook/digest
+  prefs, and the run history are single-tenant globals (`_RUNTIME_PREFS`
+  + `run_registry`). A future authenticated mode would scope them per
+  account/API key.
 - **A2A inter-agent protocol (PRD M9.3).** The Strands A2A protocol is
   documented as the production inter-agent communication layer and is
   deliberately *not* used in the current release: the orchestrator makes
