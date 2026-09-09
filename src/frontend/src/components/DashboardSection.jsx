@@ -288,8 +288,21 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
         }
         try {
           const { data: rec } = await axios.get(`/api/runs/${rid}`)
+          // Incremental UI sync: even if SSE is dead, the polling record
+          // carries the full step history, candidates, and provenance.
           if (Array.isArray(rec.execution_traces) && rec.execution_traces.length) {
             rec.execution_traces.forEach(mergeStep)
+          }
+          // Progressive sync: keep the dashboard in sync even when SSE is
+          // buffered. Each field is only promoted when the record has it.
+          if (rec.candidates && rec.candidates.length) setCandidates(rec.candidates)
+          if (rec.alert) setAlertData(rec.alert)
+          if (rec.provenance) setProvenance(rec.provenance)
+          if (rec.llm_rationale) setLlmRationale(rec.llm_rationale)
+          if (rec.status && rec.status !== 'running') {
+            const map = { awaiting_approval: 'target_acquired', weather_blocked: 'monitoring', error: 'error', rejected: 'rejected', skipped: 'skipped' }
+            const s = rec.event?.agent_status ? (map[rec.event.agent_status] || 'processing') : rec.status
+            if (s && s !== 'processing') setAgentStatus(s)
           }
           if (rec.finished_at && ['completed', 'failed', 'skipped'].includes(rec.status)) {
             clearInterval(pollTimerRef.current)
@@ -297,7 +310,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             if (finishedRef.current !== rid) finishRun(rid)
           }
         } catch {}
-      }, 4000)
+      }, 2500)
       finishTimerRef.current = setTimeout(() => {
         if (pollTimerRef.current) clearInterval(pollTimerRef.current)
         setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
@@ -332,13 +345,17 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
               if (Array.isArray(rec.execution_traces) && rec.execution_traces.length) {
                 rec.execution_traces.forEach(mergeStep)
               }
+              if (rec.candidates && rec.candidates.length) setCandidates(rec.candidates)
+              if (rec.alert) setAlertData(rec.alert)
+              if (rec.provenance) setProvenance(rec.provenance)
+              if (rec.llm_rationale) setLlmRationale(rec.llm_rationale)
               if (rec.finished_at && ['completed', 'failed', 'skipped'].includes(rec.status)) {
                 clearInterval(pollTimerRef.current)
                 if (esRef.current) esRef.current.close()
                 if (finishedRef.current !== busyRun) finishRun(busyRun)
               }
             } catch {}
-          }, 4000)
+          }, 2500)
           finishTimerRef.current = setTimeout(() => {
             if (pollTimerRef.current) clearInterval(pollTimerRef.current)
             setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
