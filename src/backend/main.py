@@ -748,11 +748,29 @@ async def api_run_events(run_id: str):
         raise HTTPException(status_code=404, detail="Run not found")
 
     async def event_stream():
+        # Keepalive prevents Render/Nginx from buffering or timing out the
+        # stream during long blocking stages (e.g. 13-30s TAP query).
         while True:
-            step = await queue.get()
-            yield f"data: {step.model_dump_json()}\n\n"
+            try:
+                step = await asyncio.wait_for(queue.get(), timeout=15.0)
+                yield f"data: {step.model_dump_json()}\n\n"
+                # Terminal marker closes the stream cleanly from server side.
+                if step.tool_name == "run" and step.status in ("completed", "failed", "skipped"):
+                    break
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+            except asyncio.CancelledError:
+                break
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/runs/{run_id}/report")

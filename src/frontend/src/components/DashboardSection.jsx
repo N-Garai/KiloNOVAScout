@@ -40,6 +40,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const esRef = useRef(null)
   const finishTimerRef = useRef(null)
   const retryTimerRef = useRef(null)
+  const pollTimerRef = useRef(null)
   const finishedRef = useRef(null)
   const loadingRef = useRef(false)
   loadingRef.current = loading
@@ -56,6 +57,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       if (esRef.current) esRef.current.close()
       if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
     }
   }, [])
 
@@ -211,6 +213,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       setRunError('Run finished but its results could not be fetched. Reload and check the latest event.')
     } finally {
       if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
       setStreamState('closed')
       setLoading(false)
     }
@@ -233,21 +236,27 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     setAlertData(null)
     setReportMarkdown('')
 
-    // Wake-then-launch: Render free spins down after ~15 min idle — ping
-    // until the backend answers (up to ~90s) BEFORE launching anything.
-    setWakingBackend(true)
-    const warmDeadline = Date.now() + 90000
+    // Wake-then-launch: cold backend needs waking, warm backend should not
+    // flash a spurious "WAKING" banner. Probe once quietly first.
     let warm = false
-    while (Date.now() < warmDeadline) {
-      try {
-        await axios.get('/api/ping', { timeout: 10000 })
-        warm = true
-        break
-      } catch {
-        await new Promise((r) => setTimeout(r, 5000))
+    try {
+      await axios.get('/api/ping', { timeout: 5000 })
+      warm = true
+    } catch {
+      // First ping failed — now enter visible waking loop.
+      setWakingBackend(true)
+      const warmDeadline = Date.now() + 90000
+      while (Date.now() < warmDeadline) {
+        try {
+          await axios.get('/api/ping', { timeout: 10000 })
+          warm = true
+          break
+        } catch {
+          await new Promise((r) => setTimeout(r, 5000))
+        }
       }
+      setWakingBackend(false)
     }
-    setWakingBackend(false)
     if (!warm) {
       setRunError('Backend did not wake within 90 seconds — Render may be queuing the free instance. Wait a minute and launch again.')
       setLoading(false)
@@ -257,6 +266,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     // Streaming launch: POST returns instantly with a run id; steps arrive
     // over SSE as each agent finishes, and completion triggers the fetch.
     // Guard: if no finish event arrives in ~5 minutes, stop waiting loudly.
+    // Polling safety net: some proxies buffer SSE and deliver only at close,
+    // so we also poll the record every 4s to converge even without live stream.
     try {
       const { data } = await axios.post(
         `/api/simulate-event?event_class=${encodeURIComponent(simClass)}`,
@@ -265,7 +276,26 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       if (!rid) throw new Error('backend did not return a run id')
       setRunId(rid)
       startEventStream(rid, () => finishRun(rid))
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+      pollTimerRef.current = setInterval(async () => {
+        if (finishedRef.current === rid) {
+          clearInterval(pollTimerRef.current)
+          return
+        }
+        try {
+          const { data: rec } = await axios.get(`/api/runs/${rid}`)
+          if (Array.isArray(rec.execution_traces) && rec.execution_traces.length) {
+            rec.execution_traces.forEach(mergeStep)
+          }
+          if (rec.finished_at && ['completed', 'failed', 'skipped'].includes(rec.status)) {
+            clearInterval(pollTimerRef.current)
+            if (esRef.current) esRef.current.close()
+            if (finishedRef.current !== rid) finishRun(rid)
+          }
+        } catch {}
+      }, 4000)
       finishTimerRef.current = setTimeout(() => {
+        if (pollTimerRef.current) clearInterval(pollTimerRef.current)
         setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
         setLoading(false)
       }, 5 * 60 * 1000)
@@ -287,7 +317,26 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           setLiveFound(false)
           setLiveNote(`Pipeline busy — attached to the in-progress run ${busyRun}. Watch it stream below.`)
           startEventStream(busyRun, () => finishRun(busyRun))
+          if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+          pollTimerRef.current = setInterval(async () => {
+            if (finishedRef.current === busyRun) {
+              clearInterval(pollTimerRef.current)
+              return
+            }
+            try {
+              const { data: rec } = await axios.get(`/api/runs/${busyRun}`)
+              if (Array.isArray(rec.execution_traces) && rec.execution_traces.length) {
+                rec.execution_traces.forEach(mergeStep)
+              }
+              if (rec.finished_at && ['completed', 'failed', 'skipped'].includes(rec.status)) {
+                clearInterval(pollTimerRef.current)
+                if (esRef.current) esRef.current.close()
+                if (finishedRef.current !== busyRun) finishRun(busyRun)
+              }
+            } catch {}
+          }, 4000)
           finishTimerRef.current = setTimeout(() => {
+            if (pollTimerRef.current) clearInterval(pollTimerRef.current)
             setRunError('Run is taking unusually long (no finish event in 5 minutes). It may still complete server-side — check back shortly.')
             setLoading(false)
           }, 5 * 60 * 1000)
@@ -555,11 +604,11 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
 
           <button
             onClick={simulateEvent}
-            disabled={loading}
+            disabled={loading || streamState === 'live' || streamState === 'reconnecting'}
             className="px-12 py-4 bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta rounded-lg font-cosmic font-bold text-lg hover:opacity-90 transition-opacity glow-cyan disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading
-              ? (wakingBackend ? 'WAKING BACKEND…' : (streamState === 'reconnecting' ? 'RECONNECTING…' : 'PROCESSING…'))
+              ? (wakingBackend ? 'WAKING BACKEND…' : streamState === 'reconnecting' ? 'RECONNECTING…' : 'PROCESSING…')
               : `LAUNCH ${((eventClasses.find((c) => c.key === simClass) || {}).label || simClass || 'GCN').toUpperCase()} ALERT`}
           </button>
 
@@ -643,7 +692,26 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             className="glass rounded-xl p-6 mb-8 border border-cosmic-magenta/30"
           >
             <div className="font-cosmic text-sm text-cosmic-magenta mb-2">LLM RATIONALE</div>
-            <div className="font-mono text-xs text-gray-300">{llmRationale}</div>
+            <div className="font-mono text-xs text-gray-300">{
+              (() => {
+                const raw = String(llmRationale).trim()
+                // Defensive: backend already strips JSON wrapper, but old deploys
+                // still send raw `{"decision":...}` which leaked into the card.
+                if (raw.startsWith('{') || raw.startsWith('```')) {
+                  try {
+                    const start = raw.indexOf('{')
+                    const end = raw.lastIndexOf('}')
+                    if (start >= 0 && end > start) {
+                      const obj = JSON.parse(raw.slice(start, end + 1))
+                      if (obj.rationale) return String(obj.rationale)
+                    }
+                  } catch {}
+                  // Fallback: strip braces if still JSON-like
+                  if (raw.includes('"rationale"')) return raw.replace(/^[`{\s]+|[`}\s]+$/g, '').slice(0, 600)
+                }
+                return raw
+              })()
+            }</div>
           </motion.div>
         )}
 
