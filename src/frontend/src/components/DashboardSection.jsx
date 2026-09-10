@@ -284,7 +284,10 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       const poll = async () => {
         if (finishedRef.current === rid) return
         try {
-          const { data: rec } = await axios.get(`/api/runs/${rid}`)
+          const { data: rec } = await axios.get(`/api/runs/${rid}`, {
+            headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+            params: { t: Date.now() },
+          })
           if (Array.isArray(rec.execution_traces) && rec.execution_traces.length) {
             rec.execution_traces.forEach(mergeStep)
           }
@@ -333,7 +336,10 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           const busyPoll = async () => {
             if (finishedRef.current === busyRun) return
             try {
-              const { data: rec } = await axios.get(`/api/runs/${busyRun}`)
+              const { data: rec } = await axios.get(`/api/runs/${busyRun}`, {
+                headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+                params: { t: Date.now() },
+              })
               if (Array.isArray(rec.execution_traces) && rec.execution_traces.length) {
                 rec.execution_traces.forEach(mergeStep)
               }
