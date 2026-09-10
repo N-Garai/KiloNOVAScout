@@ -479,27 +479,61 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     setStreamState('live')
   }
 
+  const [reportLoading, setReportLoading] = useState(false)
   const openReport = async () => {
     if (!runId) return
+    if (reportLoading) return
+    // If we already have html, just open modal (project-aries pattern: cached report)
+    if (reportHtml && reportHtml.length > 200) {
+      setShowReport(true)
+      return
+    }
+    setReportLoading(true)
     try {
-      const { data } = await axios.get(`/api/runs/${runId}/report`)
-      setReportMarkdown(data.markdown || data.content || '')
-      setReportHtml(data.html || '')
+      const { data } = await axios.get(`/api/runs/${runId}/report`, {
+        headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        params: { t: Date.now() },
+      })
+      const md = data.markdown || data.content || ''
+      const html = data.html || ''
+      if (!md && !html) throw new Error('empty report')
+      setReportMarkdown(md)
+      setReportHtml(html)
       setShowReport(true)
     } catch (e) {
       console.error('report fetch failed', e)
+      // One retry after 800ms (covers race where report builds right after run finished)
+      try {
+        await new Promise(r => setTimeout(r, 800))
+        const { data } = await axios.get(`/api/runs/${runId}/report`, {
+          headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+          params: { t: Date.now() },
+        })
+        const md = data.markdown || data.content || ''
+        const html = data.html || ''
+        if (md || html) {
+          setReportMarkdown(md)
+          setReportHtml(html)
+          setShowReport(true)
+          return
+        }
+      } catch {}
+      setRunError('Report not ready yet — wait a moment and try again. If this persists, check that the run finished (16 events, stream closed).')
+    } finally {
+      setReportLoading(false)
     }
   }
 
   const printReport = async () => {
-    // v3 PRD M6.5 Option C: print the rich HTML report (embeds visualizations
-    // and calculation traces + a print-optimized stylesheet).
     if (!runId) return
     let htmlDoc = reportHtml
     let mdDoc = reportMarkdown
     if (!htmlDoc && !mdDoc) {
       try {
-        const { data } = await axios.get(`/api/runs/${runId}/report`)
+        const { data } = await axios.get(`/api/runs/${runId}/report`, {
+          headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+          params: { t: Date.now() },
+        })
         htmlDoc = data.html || ''
         mdDoc = data.markdown || data.content || ''
         setReportHtml(htmlDoc)
@@ -895,14 +929,19 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                 TARGET CANDIDATES ({candidates.length})
               </div>
               <div className="flex gap-2">
-                <button onClick={openReport} className="px-3 py-1.5 rounded border border-white/10 text-xs font-mono hover:bg-white/5">
-                  View Report
+                <button onClick={openReport} disabled={reportLoading} className={`px-3 py-1.5 rounded border text-xs font-mono hover:bg-white/5 ${reportLoading ? 'opacity-50 cursor-wait border-white/5' : 'border-white/10'}`}>
+                  {reportLoading ? 'Loading…' : 'View Report'}
                 </button>
                 <button onClick={printReport} className="px-3 py-1.5 rounded border border-white/10 text-xs font-mono hover:bg-white/5">
                   Download PDF
                 </button>
               </div>
             </div>
+            {(alertData?.event_class === 'grb' || alertData?.event_class === 'neutrino') && (
+              <div className="mb-3 font-mono text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 px-3 py-2 rounded">
+                Reference hosts — field strategy: tiling covers the {alertData.event_class === 'grb' ? 'afterglow' : 'neutrino'} error circle (degree-scale). Host list is advisory only; scores compress when all hosts share similar airmass (e.g., below horizon at current LST).
+              </div>
+            )}
             <div className="space-y-3">
               {candidates.map((candidate, index) => (
                 <div
@@ -933,8 +972,6 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                   {candidate.score_breakdown && (
                     <div className="mt-2 font-mono text-[11px] text-gray-500">
                       {(() => {
-                        // v3 full formula (PRD M10):
-                        // S = α·P + β·w_Sch − γ·X̄ − δ·C + ε·B + ζ·SNR − η·L_moon
                         const t = candidate.score_breakdown.terms || {}
                         const w = candidate.score_breakdown.weights || {}
                         const fmt = (v) => Number(v || 0).toFixed(2)
@@ -951,6 +988,25 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                         }
                         return `S = ${fmt(alpha)}×${fmt(t.spatial)} + ${fmt(beta)}×${fmt(t.schechter ?? t.mass)} − ${fmt(gamma)}×${fmt(t.airmass)} − ${fmt(delta)}×${fmt(t.cloud)} = ${f(candidate.composite_score)}`
                       })()}
+                    </div>
+                  )}
+                  {candidate.observability && (
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {candidate.observability.mean_airmass != null && (
+                        <span className={`font-mono text-[10px] px-1.5 py-px rounded border ${candidate.observability.mean_airmass >= 38 ? 'text-red-400 border-red-500/30 bg-red-500/10' : candidate.observability.mean_airmass > 2.5 ? 'text-amber-400 border-amber-500/20 bg-amber-500/10' : 'text-green-400 border-green-500/20 bg-green-500/10'}`}>
+                          X̄ {Number(candidate.observability.mean_airmass).toFixed(2)} {candidate.observability.mean_airmass >= 38 ? 'below horizon' : candidate.observability.mean_airmass > 2.5 ? 'high airmass' : 'observable'}
+                        </span>
+                      )}
+                      {candidate.observability.moon_separation_deg != null && (
+                        <span className={`font-mono text-[10px] px-1.5 py-px rounded border ${candidate.observability.moon_safe === false ? 'text-amber-400 border-amber-500/20 bg-amber-500/10' : 'text-gray-400 border-white/10 bg-white/5'}`}>
+                          moon {Number(candidate.observability.moon_separation_deg).toFixed(1)}° {candidate.observability.moon_safe === false ? '×' : '✓'}
+                        </span>
+                      )}
+                      {candidate.observability.extinction_mag != null && (
+                        <span className="font-mono text-[10px] text-gray-500 border border-white/5 px-1.5 py-px rounded">
+                          Δm {Number(candidate.observability.extinction_mag).toFixed(2)} mag
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>

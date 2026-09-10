@@ -20,6 +20,19 @@ const AGENT_OF = [
   [/^run/, 'Orchestrator'],
 ]
 
+const AGENT_SKILLS_TOOLS = {
+  'Ingestion Agent': { tools: ['ingestion.filter_gcn'], skills: ['event_classes'] },
+  'HEALPix Triage': { tools: ['parse_healpix_map','build_point_skymap'], skills: ['astrometry'] },
+  'Galaxy Crossmatch': { tools: ['query_glade_catalog','compute_full_score'], skills: ['catalog','scoring'] },
+  'Ephemeris & Weather': { tools: ['integrated_airmass','check_observatory_weather'], skills: ['ephemeris','weather'] },
+  'GRB Validator': { tools: ['validator.multimessenger'], skills: ['coincidence'] },
+  'Scheduler': { tools: ['optimize_slew_order','generate_telescope_slew_script'], skills: ['scheduling','tiling'] },
+  'LLM Rationale': { tools: ['llm.rationale','llm.triage_advice','llm.host_explain'], skills: ['reasoning','visualization'] },
+  'Report Writer': { tools: ['build_report_markdown','build_report_html'], skills: ['writing','latex'] },
+  'Dome Safety': { tools: ['check_dome_safety'], skills: ['safety'] },
+  'Notifier': { tools: ['send_sms_alert'], skills: ['safety'] },
+}
+
 const agentOf = (toolName = '') => {
   for (const [re, agent] of AGENT_OF) {
     if (re.test(toolName)) return agent
@@ -239,6 +252,24 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
                 )}
                 {trace.attempt > 1 && (
                   <span className="text-yellow-400">attempt {trace.attempt}</span>
+                )}
+                {/* Skill/tool tags once tick appears — not just in dropdown */}
+                {st.glyph === '✓' || st.glyph === '○' ? (
+                  <span className="flex flex-wrap gap-1 items-center">
+                    {(AGENT_SKILLS_TOOLS[agent]?.tools || []).slice(0,2).map(t => (
+                      <span key={t} className="font-mono text-[9px] text-cosmic-cyan bg-cosmic-cyan/10 border border-cosmic-cyan/20 px-1.5 py-px rounded">
+                        {t}
+                      </span>
+                    ))}
+                    {(AGENT_SKILLS_TOOLS[agent]?.skills || []).slice(0,2).map(s => (
+                      <span key={s} className="font-mono text-[9px] text-gray-400 bg-white/5 border border-white/10 px-1.5 py-px rounded">
+                        {s}
+                      </span>
+                    ))}
+                  </span>
+                ) : null}
+                {trace.status === 'skipped' && trace.output_summary && (
+                  <span className="text-gray-500 text-[10px] truncate max-w-[260px]">{trace.output_summary}</span>
                 )}
                 <button
                   onClick={() => setExpanded(isOpen ? null : id)}
