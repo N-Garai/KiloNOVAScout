@@ -7,6 +7,12 @@ greedy nearest-neighbor heuristic on the alt/az sphere.
 import json
 from typing import List, Dict, Any
 
+try:
+    from strands import tool as _tool
+except Exception:
+    def _tool(fn):  # type: ignore
+        return fn
+
 
 def _angular_distance(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
     """Great-circle angular distance between two points on the celestial sphere (degrees)."""
@@ -46,6 +52,7 @@ def _altaz_distance(ra1: float, dec1: float, ra2: float, dec2: float,
         return _angular_distance(ra1, dec1, ra2, dec2)
 
 
+@_tool
 def optimize_slew_order(targets: List[Dict[str, Any]], site_lat: float, site_lon: float,
                         obstime=None) -> List[Dict[str, Any]]:
     """Greedy nearest-neighbor TSP heuristic for telescope slew ordering.

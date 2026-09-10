@@ -45,49 +45,100 @@ export default function ArchitectureSection() {
       name: "Ingestion Agent",
       purpose: "Filters and normalizes GCN notices — accepts BNS/NSBH mergers, rejects BBH and retractions.",
       tools: ["ingestion.filter_gcn"],
+      skills: ["event_classes"],
+      llm: "triage_advice (gated)",
       accent: "cyan",
     },
     {
       name: "HEALPix Triage Agent",
       purpose: "Parses skymap FITS files and calculates the 90% localization volume and distance.",
-      tools: ["parse_healpix_map"],
+      tools: ["parse_healpix_map", "build_point_skymap"],
+      skills: ["astrometry"],
+      llm: false,
       accent: "magenta",
     },
     {
       name: "Galaxy Crossmatch Agent",
       purpose: "Identifies host galaxy candidates in the GLADE+ catalog with full v3 scoring.",
-      tools: ["query_glade_catalog", "compute_full_score"],
+      tools: ["query_glade_catalog", "compute_full_score", "schechter_weight"],
+      skills: ["catalog", "scoring"],
+      llm: "host_explain (gated)",
       accent: "purple",
     },
     {
       name: "Ephemeris & Weather Agents",
       purpose: "Calculates target observability and fetches live site conditions in parallel.",
-      tools: ["integrated_airmass", "check_observatory_weather", "lunar_penalty"],
+      tools: ["integrated_airmass", "check_observatory_weather", "lunar_penalty", "atmospheric_extinction"],
+      skills: ["ephemeris", "weather"],
+      llm: "weather_risk (gated)",
       accent: "lime",
     },
     {
       name: "GRB Validator Agent",
       purpose: "Performs multi-messenger coincidence checks against the GRB catalog.",
       tools: ["validator.multimessenger"],
+      skills: ["coincidence"],
+      llm: false,
       accent: "orange",
     },
     {
       name: "Scheduler Agent",
       purpose: "Optimizes the telescope slew sequence (TSP) and generates the ASCOM/INDI script.",
-      tools: ["optimize_slew_order", "generate_telescope_slew_script"],
+      tools: ["optimize_slew_order", "generate_telescope_slew_script", "suggest_tiling"],
+      skills: ["scheduling", "tiling"],
+      llm: false,
       accent: "pink",
     },
     {
       name: "LLM Rationale Agent",
       purpose: "Generates the human-readable summary and decision justification, with plots in parallel.",
       tools: ["llm.rationale", "generate_run_visualizations"],
+      skills: ["reasoning", "visualization"],
+      llm: "full (512 tok, JSON)",
+      accent: "blue",
+    },
+    {
+      name: "Writer Agent",
+      purpose: "Drafts Abstract/Methodology/Discussion/Conclusion via LLM; calculations + figures stay deterministic.",
+      tools: ["build_report_markdown", "build_report_html", "build_report_latex"],
+      skills: ["writing", "latex"],
+      llm: "section drafts (350 tok each)",
       accent: "blue",
     },
     {
       name: "Human Approval Gate",
       purpose: "Final human verification before execution — dome re-checked, one click to fire.",
       tools: ["check_dome_safety", "approve_slew_script"],
+      skills: ["safety"],
+      llm: false,
       accent: "green",
+    },
+  ]
+
+  const subagents = [
+    {
+      name: "↳ RetractionAgent",
+      purpose: "Hook-gated: fires only on role==retraction — marks superseded run rejected, no slew.",
+      tools: ["retraction.hook"],
+      skills: ["safety"],
+      llm: false,
+      accent: "cyan",
+    },
+    {
+      name: "↳ CoincidenceAgent",
+      purpose: "Hook-gated: BNS + nearby GRB (<5°) — validator + LLM coincidence narrative.",
+      tools: ["coincidence.hook", "validator.multimessenger"],
+      skills: ["coincidence"],
+      llm: "narrative (gated)",
+      accent: "orange",
+    },
+    {
+      name: "↳ AnomalyAgent",
+      purpose: "Hook-gated: top P<0.02 outlier — LLM tiling suggestion when host ranking is ambiguous.",
+      tools: ["anomaly.hook", "suggest_tiling"],
+      skills: ["anomaly", "tiling"],
+      llm: "outlier note (gated)",
+      accent: "purple",
     },
   ]
 
@@ -107,6 +158,8 @@ export default function ArchitectureSection() {
     { label: "Scheduler", description: "Generate Slew Script", type: "agent", color: "cosmic-pink" },
     { label: "→", type: "arrow", color: "cosmic-cyan" },
     { label: "LLM Rationale", description: "Human-Readable Justification", type: "agent", color: "cosmic-blue" },
+    { label: "→", type: "arrow", color: "cosmic-cyan" },
+    { label: "Writer", description: "Abstract/Method/Discuss/Concl.", type: "agent", color: "cosmic-blue" },
     { label: "→", type: "arrow", color: "cosmic-cyan" },
     { label: "Human Approval", description: "1-Click Execute", type: "agent", color: "green" },
   ]
@@ -177,14 +230,14 @@ export default function ArchitectureSection() {
       {/* AGENT DISCOVERY — pinned horizontal scroll.
           Scrolling down slides the agent cards left until the last card,
           then the page continues. Scrolling up slides them back right. */}
-      <div ref={trackWrapRef} className="relative h-[320vh]">
+      <div ref={trackWrapRef} className="relative h-[360vh]">
         <div className="sticky top-0 h-screen flex flex-col justify-center overflow-hidden">
           <div className="max-w-7xl mx-auto w-full px-4 mb-8">
             <h3 className="font-cosmic text-3xl md:text-4xl font-bold text-white">
               AGENT <span className="bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta bg-clip-text text-transparent">DISCOVERY</span>
             </h3>
             <p className="font-mono text-xs text-gray-400 mt-2 tracking-widest uppercase">
-              Scroll to travel the pipeline — 8 agents, left to right
+              Scroll to travel the pipeline — 9 agents + 3 hook-gated subagents, left to right
             </p>
           </div>
 
@@ -195,23 +248,81 @@ export default function ArchitectureSection() {
                 className={`glass rounded-2xl p-7 border ${ACCENT[agent.accent].split(' ')[0]} w-[78vw] sm:w-[52vw] md:w-[30rem] shrink-0 flex flex-col`}
               >
                 <div className="font-mono text-xs text-gray-500 mb-3 tracking-widest">
-                  {String(index + 1).padStart(2, '0')} / 08
+                  {String(index + 1).padStart(2, '0')} / 09
                 </div>
-                <h4 className={`font-cosmic text-2xl font-bold mb-3 ${ACCENT[agent.accent].split(' ')[1]}`}>
+                <h4 className={`font-cosmic text-xl font-bold mb-3 ${ACCENT[agent.accent].split(' ')[1]}`}>
                   {agent.name}
                 </h4>
-                <p className="font-grotesk text-sm text-gray-300 leading-relaxed mb-6 flex-1">
+                <p className="font-grotesk text-sm text-gray-300 leading-relaxed mb-4 flex-1">
                   {agent.purpose}
                 </p>
-                <div className="flex flex-wrap gap-2">
-                  {agent.tools.map((tool) => (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {agent.tools.map((t) => (
                     <span
-                      key={tool}
-                      className="font-mono text-[11px] text-gray-300 bg-black/60 border border-white/10 px-2.5 py-1 rounded-md"
+                      key={t}
+                      className="font-mono text-[10px] text-cosmic-cyan bg-cosmic-cyan/10 border border-cosmic-cyan/20 px-2 py-1 rounded"
                     >
-                      {tool}()
+                      {t}
                     </span>
                   ))}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {agent.skills.map((s) => (
+                    <span
+                      key={s}
+                      className="font-mono text-[10px] text-gray-400 bg-white/5 border border-white/10 px-2 py-1 rounded"
+                    >
+                      {s}
+                    </span>
+                  ))}
+                  {agent.llm && (
+                    <span className="font-mono text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded">
+                      {agent.llm}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {/* Subagents — indented, hook-gated */}
+            {subagents.map((agent) => (
+              <div
+                key={agent.name}
+                className={`glass rounded-2xl p-7 border ${ACCENT[agent.accent].split(' ')[0]} w-[78vw] sm:w-[52vw] md:w-[28rem] shrink-0 flex flex-col ml-2 border-l-2`}
+              >
+                <div className="font-mono text-[10px] text-amber-400 mb-3 tracking-widest uppercase">
+                  Hook-gated subagent
+                </div>
+                <h4 className={`font-cosmic text-lg font-bold mb-3 ${ACCENT[agent.accent].split(' ')[1]}`}>
+                  {agent.name}
+                </h4>
+                <p className="font-grotesk text-sm text-gray-300 leading-relaxed mb-4 flex-1">
+                  {agent.purpose}
+                </p>
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {agent.tools.map((t) => (
+                    <span
+                      key={t}
+                      className="font-mono text-[10px] text-cosmic-cyan bg-cosmic-cyan/10 border border-cosmic-cyan/20 px-2 py-1 rounded"
+                    >
+                      {t}
+                    </span>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {agent.skills.map((s) => (
+                    <span
+                      key={s}
+                      className="font-mono text-[10px] text-gray-400 bg-white/5 border border-white/10 px-2 py-1 rounded"
+                    >
+                      {s}
+                    </span>
+                  ))}
+                  {agent.llm && (
+                    <span className="font-mono text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded">
+                      {agent.llm}
+                    </span>
+                  )}
                 </div>
               </div>
             ))}

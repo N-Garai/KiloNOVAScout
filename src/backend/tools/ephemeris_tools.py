@@ -6,7 +6,14 @@ metrics for a given target and observation window.
 
 from typing import Dict
 
+try:
+    from strands import tool as _tool
+except Exception:
+    def _tool(fn):  # type: ignore
+        return fn
 
+
+@_tool
 def integrated_airmass(target_ra: float, target_dec: float,
                        site_lat: float, site_lon: float,
                        duration_hours: float = 2.0) -> Dict[str, float]:
@@ -87,3 +94,14 @@ def integrated_airmass(target_ra: float, target_dec: float,
             "max_airmass": 2.5,
             "error": str(exc),
         }
+
+
+@_tool
+def check_lunar_separation(target_ra: float, target_dec: float) -> Dict[str, float]:
+    """Moon proximity check per PRD M7.3 — delegates to scoring_tools.lunar_penalty."""
+    try:
+        from .scoring_tools import lunar_penalty as _lp
+        return _lp(target_ra, target_dec)
+    except Exception:
+        sep_deg = 20.0
+        return {"moon_separation_deg": sep_deg, "lunar_penalty": 0.25, "moon_safe": False}

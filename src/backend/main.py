@@ -263,6 +263,7 @@ async def _build_simulate_response(agent_output, run_id: str) -> dict:
             "slew_script": record.slew_script or "",
             "run_id": run_id,
             "llm_rationale": record.llm_rationale or "",
+            "llm_structured": run_event.get("llm_structured") or None,
             # Same shape as the streaming record endpoint: provenance badge,
             # visualizations list, and live-check flags stay available here.
             "provenance": dict(record.provenance) if record.provenance else None,
@@ -297,6 +298,7 @@ async def _build_simulate_response(agent_output, run_id: str) -> dict:
         "slew_script": details.get("slew_script", ""),
         "run_id": run_id,
         "llm_rationale": kilonova_agent.agent_state.llm_rationale,
+        "llm_structured": None,
         # v3 provenance badge (M4.4): skymap/catalog/event data-source attribution
         "provenance": await _run_provenance(run_id),
         "visualizations": await _run_visualizations(run_id),
@@ -697,6 +699,7 @@ async def api_run_record(run_id: str):
         "execution_traces": [_step_to_dict(s) for s in (record.steps or [])],
         "run_id": record.run_id,
         "llm_rationale": record.llm_rationale or "",
+        "llm_structured": event.get("llm_structured") or None,
         "provenance": prov,
         "visualizations": list((record.visualizations or {}).keys()),
         "live_trigger_found": (record.source == "live"),

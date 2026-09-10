@@ -24,6 +24,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const [alertData, setAlertData] = useState(null)
   const [source, setSource] = useState('mock')
   const [llmRationale, setLlmRationale] = useState('')
+  const [llmStructured, setLlmStructured] = useState(null)
   const [runId, setRunId] = useState('')
   const [reportMarkdown, setReportMarkdown] = useState('')
   const [reportHtml, setReportHtml] = useState('')
@@ -105,7 +106,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     setCandidates(data.candidates || [])
     setAgentStatus(status)
     setSource(sourceOverride || data.source || 'mock')
-    setLlmRationale(data.llm_rationale || '')
+    setLlmRationale(data.llm_rationale || (data.llm_structured && data.llm_structured.rationale) || '')
+    setLlmStructured(data.llm_structured || null)
     setProvenance(data.provenance || null)
     setLiveFound((sourceOverride || data.source) === 'live')
     setLiveNote('')
@@ -197,7 +199,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       setCandidates(data.candidates || [])
       setAgentStatus(data.status)
       setSource(data.alert?.source || 'mock')
-      setLlmRationale(data.llm_rationale || '')
+      setLlmRationale(data.llm_rationale || (data.llm_structured && data.llm_structured.rationale) || '')
+      setLlmStructured(data.llm_structured || null)
       setProvenance(data.provenance || null) // v3 data-source attribution badge (M4.4)
       setLiveFound(!!data.live_trigger_found)
       setLiveNote(data.live_check_note || '')
@@ -295,6 +298,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           if (rec.alert) setAlertData(rec.alert)
           if (rec.provenance) setProvenance(rec.provenance)
           if (rec.llm_rationale) setLlmRationale(rec.llm_rationale)
+          if (rec.llm_structured) setLlmStructured(rec.llm_structured)
+          else if (rec.event && rec.event.llm_structured) setLlmStructured(rec.event.llm_structured)
           if (rec.status && rec.status !== 'running') {
             const map = { awaiting_approval: 'target_acquired', weather_blocked: 'monitoring', error: 'error', rejected: 'rejected', skipped: 'skipped' }
             const s = rec.event?.agent_status ? (map[rec.event.agent_status] || 'processing') : rec.status
@@ -347,6 +352,8 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
               if (rec.alert) setAlertData(rec.alert)
               if (rec.provenance) setProvenance(rec.provenance)
               if (rec.llm_rationale) setLlmRationale(rec.llm_rationale)
+              if (rec.llm_structured) setLlmStructured(rec.llm_structured)
+              else if (rec.event && rec.event.llm_structured) setLlmStructured(rec.event.llm_structured)
               if (rec.finished_at && ['completed', 'failed', 'skipped'].includes(rec.status)) {
                 if (esRef.current) esRef.current.close()
                 if (finishedRef.current !== busyRun) finishRun(busyRun)
@@ -743,18 +750,28 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           </div>
         </motion.div>
 
-        {llmRationale && (
+        {(llmRationale || llmStructured) && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             className="glass rounded-xl p-6 mb-8 border border-cosmic-magenta/30"
           >
-            <div className="font-cosmic text-sm text-cosmic-magenta mb-2">LLM RATIONALE</div>
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-cosmic text-sm text-cosmic-magenta">LLM RATIONALE</div>
+              {llmStructured && typeof llmStructured.confidence === 'number' && (
+                <span className={`font-mono text-xs px-2 py-0.5 rounded-full border ${
+                  llmStructured.confidence >= 0.8 ? 'text-green-400 border-green-500/40 bg-green-500/10' :
+                  llmStructured.confidence >= 0.5 ? 'text-amber-400 border-amber-500/40 bg-amber-500/10' :
+                  'text-red-400 border-red-500/40 bg-red-500/10'
+                }`}>
+                  confidence {Math.round(llmStructured.confidence * 100)}%
+                </span>
+              )}
+            </div>
             <div className="font-mono text-xs text-gray-300">{
               (() => {
-                const raw = String(llmRationale).trim()
-                // Defensive: backend already strips JSON wrapper, but old deploys
-                // still send raw `{"decision":...}` which leaked into the card.
+                const raw = String(llmStructured?.rationale || llmRationale || '').trim()
+                if (!raw) return ''
                 if (raw.startsWith('{') || raw.startsWith('```')) {
                   try {
                     const start = raw.indexOf('{')
@@ -764,12 +781,34 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
                       if (obj.rationale) return String(obj.rationale)
                     }
                   } catch {}
-                  // Fallback: strip braces if still JSON-like
                   if (raw.includes('"rationale"')) return raw.replace(/^[`{\s]+|[`}\s]+$/g, '').slice(0, 600)
                 }
                 return raw
               })()
             }</div>
+            {llmStructured && Array.isArray(llmStructured.risks) && llmStructured.risks.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {llmStructured.risks.map((r, i) => (
+                  <span key={i} className="font-mono text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded">
+                    {r}
+                  </span>
+                ))}
+              </div>
+            )}
+            {llmStructured && Array.isArray(llmStructured.actions) && llmStructured.actions.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {llmStructured.actions.map((a, i) => (
+                  <span key={i} className="font-mono text-[11px] text-cosmic-cyan bg-cosmic-cyan/10 border border-cosmic-cyan/20 px-2 py-1 rounded capitalize">
+                    {a}
+                  </span>
+                ))}
+              </div>
+            )}
+            {llmStructured && Array.isArray(llmStructured.citations) && llmStructured.citations.length > 0 && (
+              <div className="mt-3 font-mono text-[10px] text-gray-500">
+                citations: {llmStructured.citations.join(' · ')}
+              </div>
+            )}
           </motion.div>
         )}
 

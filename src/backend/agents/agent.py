@@ -43,7 +43,11 @@ from ..models import (
     Voevent,
 )
 from ..event_classes import METADATA, evaluate_trigger, get_profile, harvest_params
+from ..llm_advisors import host_explain, triage_note, weather_risk
 from ..run_registry import RunRegistry, claim_live_trigger, live_run_id, normalize_priorities, note_live_run
+from .subagents import anomaly as anomaly_subagent
+from .subagents import coincidence as coincidence_subagent
+from .subagents import retraction as retraction_subagent
 from ..tools import KilonovaScoutTools
 from ..simulator.event_simulator import EventSimulator
 from ..llm_reasoner import reason_about_event
@@ -301,13 +305,24 @@ class KilonovaScoutAgent(Agent):
             tools.generate_telescope_slew_script,
             tools.write_observation_header,
             tools.send_sms_alert,
+            # M7 advanced math (standalone @tool wrappers)
+            tools.schechter_weight_tool,
+            tools.atmospheric_extinction_tool,
+            tools.estimate_kilonova_snr_tool,
+            tools.check_lunar_separation_tool,
+            tools.integrated_airmass_tool,
+            tools.optimize_slew_order_tool,
+            # M13 new tools
+            tools.crossmatch_ztf,
+            tools.em_bright_fetcher,
+            tools.tiling_planner,
         ] if tools else []
 
         super().__init__(
             name=agent_name,
             model=_build_model(_primary_model()),
             tools=strands_tools,
-            hooks=[_ToolAuditHook()],  # M9.4 lifecycle observability
+            hooks=[_ToolAuditHook(), retraction_subagent.RetractionHook(), coincidence_subagent.CoincidenceHook(), anomaly_subagent.AnomalyHook()],  # M9.4 + M12 hook-gated specialists
             system_prompt=(
                 "You are KilonovaScout, a Staff-level Space Systems AI orchestrator. "
                 "Run the astronomy pipeline: ingest -> skymap -> (catalog || weather) -> "
@@ -477,9 +492,30 @@ class KilonovaScoutAgent(Agent):
         await stamp(1, "ingestion.filter_gcn", "completed", output_s=json.dumps(verdict, default=str),
                     duration_ms=int((time.perf_counter() - start) * 1000))
 
-        if verdict.get("status") == "REJECTED":
+        # M11 — gated triage advisor (only on borderline HasNS/FAR)
+        try:
+            note = await asyncio.to_thread(triage_note, verdict)
+            if note:
+                await stamp(1, "llm.triage_advice", "completed", output_s=note, duration_ms=0)
+        except Exception:
+            pass
+
+        # M12 — RetractionAgent (hook-gated, 0 cost unless retraction)
+        if retraction_subagent.should_fire(payload):
+            info = retraction_subagent.handle_retraction(payload, run.run_id)
+            await stamp(1, "retraction.hook", "skipped", output_s=info.get("banner", ""), duration_ms=0)
             self.agent_state.status = "rejected"
-            return AgentOutput(message=verdict.get("gate_reason", verdict.get("reason", "Rejected by ingestion filter")), action_status="failure")
+            # Mark superseded live run as REJECTED (if it exists) so observer never slews at dead event
+            try:
+                superevent = SkymapUpdateTracker.superevent_id(payload.voevent.ivorn or "")
+                prior = live_run_id(superevent)
+                if prior and prior != run.run_id:
+                    await run_registry.finish_run(prior, "rejected", error=info.get("banner", ""), llm_rationale=info.get("banner", ""))
+                    await run_registry.attach(prior, event_update={"gate_status": "REJECTED", "gate_reason": info.get("gate_reason", "")})
+                    print(f"[RETRACTION] superseded run {prior} marked REJECTED")
+            except Exception as e:
+                print(f"[RETRACTION] superseded mark failed: {e}")
+            return AgentOutput(message=info.get("gate_reason", "Retraction — no follow-up."), action_status="failure")
 
         # Per-run event-class setup: scoring profile + harvested trigger
         # energetics (flux/signalness terms) for the catalog stage.
@@ -609,12 +645,29 @@ class KilonovaScoutAgent(Agent):
         galaxies, weather = await asyncio.gather(galaxies_task, weather_task)
         self.agent_state.observatory_weather = weather
 
+        # M11 — gated host ranking explainer (only when top two are close)
+        try:
+            explain = await asyncio.to_thread(host_explain, galaxies)
+            if explain:
+                await stamp(3, "llm.host_explain", "completed", output_s=explain, duration_ms=0)
+        except Exception:
+            pass
+
         # Provenance (M4.4/4.5.5): record which catalog tier produced the rows
         catalog_source = getattr(galaxies[0], "catalog_source", None) if galaxies else None
         await run_registry.attach(run.run_id, provenance={
             "catalog": catalog_source or "mock",
             "event": run.source,
         })
+
+        # M12 — AnomalyAgent (hook-gated: catalog_source=="live" && top P<0.02)
+        try:
+            if anomaly_subagent.should_fire(galaxies, catalog_source):
+                note = await asyncio.to_thread(anomaly_subagent.anomaly_note, galaxies)
+                if note:
+                    await stamp(3, "anomaly.hook", "completed", output_s=note, duration_ms=0)
+        except Exception:
+            pass
         _log_mem(run.run_id, "post-catalog-weather")
         gc.collect()
 
@@ -640,6 +693,17 @@ class KilonovaScoutAgent(Agent):
         except Exception as exc:
             await stamp(5, "ephemeris.observability", "failed", err=str(exc),
                         duration_ms=int((time.perf_counter() - start) * 1000))
+
+        # M13 — tiling for large error regions (point events, >5 deg²)
+        if event_class != "bns" and float(getattr(skymap, "localization_area_sq_deg", 0) or 0) > 5.0:
+            try:
+                tiling = await asyncio.to_thread(self.tools_instance.suggest_tiling, skymap, 1.0)
+                await stamp(5, "tiling.suggestion", "completed",
+                            output_s=f"{len(tiling.get('tiles', []))} tiles around RA {tiling.get('center_ra')} Dec {tiling.get('center_dec')}",
+                            duration_ms=0)
+                await run_registry.attach(run.run_id, event_update={"tiling": tiling})
+            except Exception:
+                pass
 
         # Step 6 — validator / GRB coincidence (real tool).  Only meaningful
         # for GW triggers; a GRB (or neutrino) trigger skips this stage —
@@ -667,6 +731,9 @@ class KilonovaScoutAgent(Agent):
                 await stamp(6, "validator.multimessenger", "completed",
                             output_s=f"coincidence={vres.get('coincidence_detected', False)}",
                             duration_ms=int((time.perf_counter() - start) * 1000))
+                # M12 — CoincidenceAgent (hook-gated: bns && error<5°) — predicate must be evaluated explicitly
+                grb_err = grb_catalog[0].get("error_radius_deg") if grb_catalog else None
+                _should_coincide = coincidence_subagent.should_fire(event_class, grb_err)
                 if vres.get("coincidence_detected") and top is not None:
                     # A real coincidence must move the ranking, not just the log:
                     # mirror the tools formula (additive boost, default 3.0).
@@ -687,6 +754,16 @@ class KilonovaScoutAgent(Agent):
                     galaxies = normalize_priorities(galaxies)
                     self.agent_state.candidate_galaxies = galaxies
                     grb_boost = boost
+                # M12 — coincidence narrative (gated on should_fire, advisory, not just boost)
+                if _should_coincide:
+                    try:
+                        narrative = await asyncio.to_thread(
+                            coincidence_subagent.coincidence_narrative,
+                            gw_time, top.ra_deg if top else 0.0, top.dec_deg if top else 0.0, grb_catalog)
+                        if narrative:
+                            await stamp(6, "coincidence.hook", "completed", output_s=narrative, duration_ms=0)
+                    except Exception:
+                        pass
             except Exception as exc:
                 await stamp(6, "validator.multimessenger", "failed", err=str(exc),
                             duration_ms=int((time.perf_counter() - start) * 1000))
@@ -718,6 +795,14 @@ class KilonovaScoutAgent(Agent):
             await stamp(8, "dome.safety_check", "failed", err=str(exc),
                         duration_ms=int((time.perf_counter() - start) * 1000))
 
+        # M11 — gated weather risk phrase (only when cloud 40–80% or dome marginal)
+        try:
+            risk = await asyncio.to_thread(weather_risk, self.agent_state.observatory_weather)
+            if risk:
+                await stamp(8, "llm.weather_risk", "completed", output_s=risk, duration_ms=0)
+        except Exception:
+            pass
+
         # Step 9 — LLM rationale and visualization agent run concurrently
         # (PRD M8.4: plots generated in parallel with the rationale).
         await stamp(9, "llm.rationale", "running", input_s="trigger + candidates + weather")
@@ -737,16 +822,31 @@ class KilonovaScoutAgent(Agent):
 
         rationale_task = self._llm_decision(verdict, galaxies, weather, skymap_summary, grb_boost)
         viz_task = asyncio.ensure_future(do_visualizations())
-        decision, rationale = await rationale_task
+        llm_result = await rationale_task
         visualizations = await viz_task
+
+        # M14 structured result
+        if isinstance(llm_result, dict):
+            decision = llm_result.get("decision", "ACCEPT")
+            rationale = llm_result.get("rationale", "")
+            llm_structured = llm_result
+        else:
+            # legacy tuple fallback
+            decision, rationale = llm_result if isinstance(llm_result, (list, tuple)) and len(llm_result) == 2 else ("ACCEPT", str(llm_result))
+            llm_structured = {"decision": decision, "confidence": 0.7, "risks": [], "actions": ["approve"], "rationale": rationale, "citations": []}
 
         if visualizations:
             await run_registry.attach(run.run_id, visualizations=visualizations)
         _log_mem(run.run_id, "post-viz")
         gc.collect()
-        await stamp(9, "llm.rationale", "completed", output_s=decision,
+        await stamp(9, "llm.rationale", "completed", output_s=f"{decision} conf={llm_structured.get('confidence', '?')}",
                     duration_ms=int((time.perf_counter() - start) * 1000))
         self.agent_state.llm_rationale = rationale
+        # Persist structured LLM output for frontend badge/chips/actions (M14)
+        try:
+            await run_registry.attach(run.run_id, event_update={"llm_structured": llm_structured})
+        except Exception:
+            pass
 
         # Step 10 — FITS observation header (v3 PRD M9.1)
         await stamp(10, "fits.observation_header", "running", input_s="header packaging")
@@ -825,22 +925,29 @@ class KilonovaScoutAgent(Agent):
 
     async def _llm_decision(self, verdict: Dict[str, Any], galaxies: List[Galaxy],
                             weather: ObservatoryWeather, skymap_summary: Optional[Dict[str, Any]],
-                            grb_boost: float = 1.0) -> Tuple[str, str]:
-        """Invoke the LLM with failover; never break the pipeline."""
+                            grb_boost: float = 1.0) -> Dict[str, Any]:
+        """Invoke the LLM with failover (M14 6-field); never break the pipeline."""
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 reason_about_event,
                 verdict,
                 [_galaxy_to_dict(g) for g in galaxies],
                 weather,
                 skymap_summary,
             )
+            # reason_about_event now returns dict; handle legacy tuple for safety
+            if isinstance(result, tuple) and len(result) == 2:
+                decision, rationale = result
+                return {"decision": decision, "confidence": 0.7, "risks": [], "actions": ["approve"] if decision == "ACCEPT" else ["reject"], "rationale": rationale, "citations": []}
+            if isinstance(result, dict):
+                return result
+            return {"decision": "ACCEPT", "confidence": 0.7, "risks": [], "actions": ["approve"], "rationale": str(result)[:600], "citations": []}
         except Exception as exc:
             print(f"[LLM] reason_about_event error: {exc}")
             if galaxies:
                 top = galaxies[0]
-                return "ACCEPT", f"Primary candidate {top.name} identified (composite score {getattr(top, 'composite_score', 0):.2f})."
-            return "ACCEPT", "Target candidates identified for follow-up."
+                return {"decision": "ACCEPT", "confidence": 0.65, "risks": [], "actions": ["approve"], "rationale": f"Primary candidate {top.name} identified (composite score {getattr(top, 'composite_score', 0):.2f}).", "citations": []}
+            return {"decision": "ACCEPT", "confidence": 0.65, "risks": [], "actions": ["approve"], "rationale": "Target candidates identified for follow-up.", "citations": []}
 
     def get_agent_state(self) -> AgentState:
         return self.agent_state

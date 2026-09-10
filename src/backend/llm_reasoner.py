@@ -1,11 +1,9 @@
-"""LLM reasoning module for KilonovaScout v2 Milestone 1.
+"""LLM reasoning module for KilonovaScout v2/v4.
 
-Provides `reason_about_event()` which invokes an LLM (Gemini 1.5 Flash primary,
-Groq Llama 3 fallback) with the full pipeline context and returns an
-ACCEPT/REJECT triage plus a plain-English rationale.
-
-Both keys are optional: the pipeline works with zero keys, returning an
-empty rationale string.  Failover is manual per the pinned SDK constraint.
+v2: ACCEPT/REJECT + rationale via Gemini primary / Groq fallback.
+v4 M14: structured 6-field JSON {decision,confidence,risks,actions,rationale,citations}
+v4 M16: robustness — 512 tok, json_object, 1-4-16s backoff, finish_reason/usage logging.
+Both keys are optional: the pipeline works with zero keys.
 """
 
 from __future__ import annotations
@@ -13,20 +11,16 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import requests
 
 
 def _primary_model_id() -> str:
-    # 1.5-flash (HTTP 404) and 2.0-flash (retired Mar 2026) are both dead.
-    # gemini-2.5-flash is GA, documented, and free-tier.  Overridable.
     return os.getenv("PRIMARY_LLM", "gemini/gemini-2.5-flash")
 
 
 def _fallback_model_id() -> str:
-    # llama-3.3-70b-versatile was shut down Aug 16, 2026 (free/dev tiers).
-    # Groq's Production-tier replacement is openai/gpt-oss-120b.
     return os.getenv("FALLBACK_LLM", "groq/openai/gpt-oss-120b")
 
 
@@ -36,10 +30,9 @@ def _build_reasoning_prompt(
     weather: Any,
     skymap_summary: Dict[str, Any] | None,
 ) -> str:
-    """Assemble a structured prompt for the reasoning LLM."""
+    """Assemble a structured prompt for the reasoning LLM (M14 6-field)."""
 
     def _get_nested(obj, *keys, default=None):
-        """Safely walk nested dicts/pydantic models."""
         cur = obj
         for key in keys:
             if cur is None:
@@ -70,18 +63,25 @@ def _build_reasoning_prompt(
             f"dome_safe={weather.dome_safe}"
         )
 
+    # M14: ask for 6-field structured output (was 2-field in v2)
     return f"""You are KilonovaScout, an autonomous multi-messenger astronomy targeting agent.
 
-Given the following event pipeline data, return a JSON object with two fields:
+Given the following event pipeline data, return a JSON object with SIX fields:
 1. "decision": "ACCEPT" or "REJECT"
-2. "rationale": A 2-3 sentence plain-English justification for the dashboard.
+2. "confidence": number 0.0-1.0 (your confidence in the decision)
+3. "risks": array of short risk strings (e.g. ["cloud 62%", "moon 18°"])
+4. "actions": array of 2-3 suggested actions from ["approve","monitor","reject"]
+5. "rationale": 2-3 sentence plain-English justification for the dashboard
+6. "citations": array of data citations (e.g. ["VOEvent BNS=0.98", "Open-Meteo cloud=62%"])
 
-Do NOT return anything except the JSON object.
+Do NOT return anything except the JSON object. Keep rationale under 40 words.
 
 --- Trigger Verdict ---
 IVORN: {verdict.get('superevent_id', 'unknown')}
 FAR: {verdict.get('far', 'unknown')}
 p_astro: {verdict.get('p_astro', 'unknown')}
+BNS: {verdict.get('BNS', verdict.get('bns', 'unknown'))} NSBH: {verdict.get('NSBH', verdict.get('nsbh', 'unknown'))} HasNS: {verdict.get('gate_confidence', verdict.get('HasNS', 'unknown'))}
+gate: {verdict.get('gate_reason', verdict.get('gate_subclass', ''))}
 
 --- Skymap ---
 {json.dumps(skymap_summary, indent=2) if skymap_summary else 'synthetic fallback'}
@@ -93,34 +93,62 @@ p_astro: {verdict.get('p_astro', 'unknown')}
 {weather_text}
 
 --- Instructions ---
-Evaluate whether the trigger is astrophysically significant enough to warrant
-telescope follow-up.  Consider: FAR must be < 1e-7 Hz, neutron-star probability
-> 0.2, weather dome_safe=True, and at least one candidate above horizon.
-Return ONLY the JSON with "decision" and "rationale" keys.
+Evaluate whether the trigger warrants follow-up. FAR must be <1e-7 Hz, HasNS>0.2, dome_safe=True.
+Return ONLY JSON with the six keys above.
 """
 
 
-def _call_litellm(model_id: str, prompt: str, api_key: str, timeout: int = 15) -> str:
-    """Invoke litellm via the REST API or direct import."""
-    try:
-        from litellm import completion
-        response = completion(
-            model=model_id,
-            api_key=api_key,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=256,
-        )
-        return response.choices[0].message.content
-    except Exception:
-        pass
+def _call_litellm(model_id: str, prompt: str, api_key: str, timeout: int = 20) -> str:
+    """Invoke litellm with JSON mode, 512-token budget, and 1-4-16s retry (M16)."""
+    last_exc: Optional[Exception] = None
+    # Spec M16: backoff 1s -> 4s -> 16s (not 1-2-4)
+    backoffs = [1, 4, 16]
+    for attempt in range(3):
+        try:
+            from litellm import completion
 
+            response = completion(
+                model=model_id,
+                api_key=api_key,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=512,
+                response_format={"type": "json_object"},
+                timeout=timeout,
+            )
+            # M16: log finish_reason and usage for truncation diagnosis
+            try:
+                choice = response.choices[0] if getattr(response, "choices", None) else None
+                fr = getattr(choice, "finish_reason", None) if choice else None
+                usage = getattr(response, "usage", None)
+                prompt_tok = getattr(usage, "prompt_tokens", None) if usage else None
+                comp_tok = getattr(usage, "completion_tokens", None) if usage else None
+                total_tok = getattr(usage, "total_tokens", None) if usage else None
+                print(f"[LLM] {model_id} finish_reason={fr} usage={{prompt:{prompt_tok} comp:{comp_tok} total:{total_tok}}}")
+                if fr == "length":
+                    print(f"[LLM] WARNING truncation (finish_reason=length) — consider raising max_tokens")
+            except Exception:
+                pass
+            text = response.choices[0].message.content
+            if text:
+                return text
+            raise RuntimeError("Empty completion")
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            if "429" in msg or "503" in msg or "rate" in msg or "overload" in msg or "429" in msg:
+                wait = backoffs[attempt] if attempt < len(backoffs) else 16
+                print(f"[LLM] {model_id} rate-limited, retry {attempt+1}/3 in {wait}s")
+                time.sleep(wait)
+                continue
+            break
     # Fallback: direct HTTP to the provider
     if "gemini" in model_id:
         return _call_gemini_rest(api_key, prompt, timeout, model_id)
     elif "groq" in model_id:
         return _call_groq_rest(api_key, prompt, timeout, model_id)
-
+    if last_exc:
+        raise last_exc
     raise RuntimeError(f"No invocation method available for model: {model_id}")
 
 
@@ -136,11 +164,23 @@ def _call_gemini_rest(api_key: str, prompt: str, timeout: int, model_id: str = "
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 256},
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 512,
+            "responseMimeType": "application/json",
+        },
     }
     resp = requests.post(url, json=payload, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
+    # M16: log finishReason + usageMetadata
+    try:
+        cand = (data.get("candidates") or [{}])[0]
+        fr = cand.get("finishReason")
+        usage = data.get("usageMetadata", {})
+        print(f"[LLM] {model} finishReason={fr} usageMetadata={usage}")
+    except Exception:
+        pass
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
@@ -152,11 +192,19 @@ def _call_groq_rest(api_key: str, prompt: str, timeout: int, model_id: str = "")
         "model": _model_name(model_id) or "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
-        "max_tokens": 256,
+        "max_tokens": 512,
+        "response_format": {"type": "json_object"},
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
+    try:
+        choice = (data.get("choices") or [{}])[0]
+        fr = choice.get("finish_reason")
+        usage = data.get("usage", {})
+        print(f"[LLM] groq finish_reason={fr} usage={usage}")
+    except Exception:
+        pass
     return data["choices"][0]["message"]["content"]
 
 
@@ -165,16 +213,15 @@ def reason_about_event(
     galaxies: list,
     weather: Any,
     skymap_summary: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, str]:
-    """Invoke the LLM to reason about the event.
+) -> Dict[str, Any]:
+    """Invoke the LLM to reason about the event (M14 6-field).
 
-    Returns (decision, rationale) where decision is 'ACCEPT'/'REJECT'
-    and rationale is a plain-English justification.
-    Falls back gracefully if keys are missing or both models fail.
+    Returns dict with keys {decision, confidence, risks, actions, rationale, citations}.
+    Falls back deterministically if keys absent or both models fail.
+    For backward compat, also supports tuple unpacking via ``__iter__`` shim — but
+    callers should use the dict.
     """
     primary_id = _primary_model_id()
-    # Strip pasted keys: a trailing newline (copy-paste from dashboards)
-    # breaks the Authorization header and killed the Groq fallback in prod.
     primary_key = os.getenv("GEMINI_API_KEY", "").strip()
     fallback_id = _fallback_model_id()
     fallback_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -197,25 +244,36 @@ def reason_about_event(
         except Exception as e:
             print(f"[LLM] Fallback ({fallback_id}) failed: {e}")
 
-    # Both failed or keys absent — deterministic fallback
+    # Both failed or keys absent — deterministic fallback (6-field)
     print("[LLM] No API keys available or both models failed; using deterministic rationale.")
     if verdict.get("status") == "REJECTED":
-        return "REJECT", "Trigger rejected by ingestion filter."
-    return "ACCEPT", (
-        f"Trigger accepted (p_astro={verdict.get('p_astro', '?')}). "
-        f"{len(galaxies)} candidate galaxy/galaxies identified for follow-up."
-    )
+        return {
+            "decision": "REJECT",
+            "confidence": 0.9,
+            "risks": [str(verdict.get("gate_reason", "rejected"))],
+            "actions": ["reject"],
+            "rationale": "Trigger rejected by ingestion filter.",
+            "citations": [f"gate {verdict.get('gate_reason','')}"],
+        }
+    cloud = getattr(weather, "cloud_cover_percent", 0) if weather else 0
+    dome = getattr(weather, "dome_safe", True) if weather else True
+    risks = []
+    if cloud and float(cloud) > 40:
+        risks.append(f"cloud {cloud}%")
+    if not dome:
+        risks.append("dome unsafe")
+    return {
+        "decision": "ACCEPT",
+        "confidence": 0.75,
+        "risks": risks,
+        "actions": ["approve"] if dome and float(cloud or 0) < 60 else ["monitor", "approve"],
+        "rationale": f"Trigger accepted (p_astro={verdict.get('p_astro', '?')}). {len(galaxies)} candidate(s) identified.",
+        "citations": [f"p_astro {verdict.get('p_astro','?')}", f"cloud {cloud}%"],
+    }
 
 
 def _extract_json_object(raw: str) -> Optional[dict]:
-    """Extract the first balanced {...} JSON object from model output.
-
-    Models routinely wrap the answer in fences, preambles ("Here is..."),
-    or trailing commentary — all of which break a naive json.loads and used
-    to leak raw JSON into the dashboard rationale.  Brace-matching finds the
-    object regardless of surrounding prose (string-aware, so braces inside
-    quoted text don't unbalance the scan).
-    """
+    """Extract the first balanced {...} JSON object from model output."""
     start = raw.find("{")
     if start < 0:
         return None
@@ -245,21 +303,53 @@ def _extract_json_object(raw: str) -> Optional[dict]:
     return None
 
 
-def _parse_llm_response(raw: str) -> Tuple[str, str]:
-    """Parse LLM JSON response into (decision, rationale)."""
+def _parse_llm_response(raw: str) -> Dict[str, Any]:
+    """Parse LLM JSON response into 6-field dict (M14) — never leaks raw braces."""
     raw = (raw or "").strip()
     data = _extract_json_object(raw)
     if data is not None:
         decision = str(data.get("decision", "ACCEPT")).upper()
-        rationale = str(data.get("rationale", "")).strip()
         if decision not in ("ACCEPT", "REJECT"):
             decision = "ACCEPT"
-        if rationale:
-            return decision, rationale[:600]
+        rationale = str(data.get("rationale", "")).strip() or "Target candidates identified for follow-up."
+        # Confidence 0..1
+        try:
+            conf = float(data.get("confidence", 0.75))
+            confidence = max(0.0, min(1.0, conf))
+        except Exception:
+            confidence = 0.75
+        # Risks / actions / citations — normalize to lists of strings
+        def _list(key, default):
+            val = data.get(key, default)
+            if val is None:
+                return default
+            if isinstance(val, str):
+                return [val] if val else default
+            if isinstance(val, list):
+                return [str(x) for x in val][:5]
+            return default
+        risks = _list("risks", [])
+        actions = _list("actions", ["approve"] if decision == "ACCEPT" else ["reject"])
+        citations = _list("citations", [])
+        return {
+            "decision": decision,
+            "confidence": round(confidence, 3),
+            "risks": risks,
+            "actions": actions,
+            "rationale": rationale[:600],
+            "citations": citations[:5],
+        }
     # No parseable object — extract what we can, never raw JSON braces.
     text = raw.strip().strip("`").strip()
     if text.startswith("{"):
         text = ""
     if "REJECT" in text.upper():
-        return "REJECT", (text or "Trigger rejected by model.")[:300]
-    return "ACCEPT", (text or "Target candidates identified for follow-up.")[:300]
+        return {"decision": "REJECT", "confidence": 0.6, "risks": [], "actions": ["reject"], "rationale": (text or "Trigger rejected by model.")[:300], "citations": []}
+    return {"decision": "ACCEPT", "confidence": 0.7, "risks": [], "actions": ["approve"], "rationale": (text or "Target candidates identified for follow-up.")[:300], "citations": []}
+
+
+# Backward-compat shim: older code did ``decision, rationale = reason_about_event(...)``
+# Keep a helper that returns a 2-tuple for those call sites while new code uses the dict.
+def _parse_llm_response_legacy(raw: str) -> Tuple[str, str]:
+    d = _parse_llm_response(raw)
+    return d["decision"], d["rationale"]

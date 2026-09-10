@@ -7,7 +7,14 @@ Implements Milestone 7 (advanced astrophysical math) and Milestone 10
 import math
 from typing import Dict, Optional
 
+try:
+    from strands import tool as _tool
+except Exception:  # strands not installed in unit-test envs
+    def _tool(fn):  # type: ignore
+        return fn
 
+
+@_tool
 def schechter_weight(l_k: float, l_star: float = 1.0e10, alpha: float = 1.0) -> float:
     """Schechter luminosity function weight.
 
@@ -34,6 +41,7 @@ def schechter_weight(l_k: float, l_star: float = 1.0e10, alpha: float = 1.0) -> 
     return (x ** alpha) * math.exp(-x)
 
 
+@_tool
 def atmospheric_extinction(airmass: float, zenith_extinction: float = 0.12) -> float:
     """R-band atmospheric extinction.
 
@@ -57,6 +65,7 @@ def atmospheric_extinction(airmass: float, zenith_extinction: float = 0.12) -> f
     return zenith_extinction * airmass
 
 
+@_tool
 def estimate_kilonova_snr(distance_mpc: float, peak_mag: float = 17.5) -> Dict[str, float]:
     """Estimate the observable signal-to-noise ratio for a kilonova at a given distance.
 
@@ -97,6 +106,7 @@ def estimate_kilonova_snr(distance_mpc: float, peak_mag: float = 17.5) -> Dict[s
     }
 
 
+@_tool
 def lunar_penalty(target_ra: float, target_dec: float) -> Dict[str, float]:
     """Compute a lunar proximity penalty for observing a given sky position.
 
@@ -207,3 +217,13 @@ def compute_full_score(terms_dict: Dict[str, float], weights: Dict[str, float]) 
         + kappa * terms_dict.get("signalness", 0.0)
     )
     return round(score, 6)
+
+
+@_tool
+def check_lunar_separation(target_ra: float, target_dec: float) -> Dict[str, float]:
+    """PRD alias for lunar_penalty — keeps the spec import contract stable.
+
+    Specified in v3 PRD M7.3 as ``check_lunar_separation``; implementation
+    lives in ``lunar_penalty`` (same physics, same return shape).
+    """
+    return lunar_penalty(target_ra, target_dec)

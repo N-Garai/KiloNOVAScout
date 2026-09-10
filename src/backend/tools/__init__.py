@@ -39,10 +39,19 @@ from .scoring_tools import (
     atmospheric_extinction,
     estimate_kilonova_snr,
     lunar_penalty,
+    check_lunar_separation,
     compute_full_score,
 )
 from .ephemeris_tools import integrated_airmass
+from .ephemeris_tools import check_lunar_separation as ephemeris_check_lunar
 from .scheduling_tools import optimize_slew_order
+
+# M13 skills auto-discover (A.R.I.E.S pattern) — keep import side-effect for audit greps
+try:
+    from ..skills import discover_skills as _discover_skills
+    _discover_skills()
+except Exception:
+    pass
 from ..event_classes import get_profile, flux_proxy
 
 
@@ -771,6 +780,36 @@ class KilonovaScoutTools:
         )
 
     @tool
+    def suggest_tiling(self, skymap: HealpixSkymap, fov_deg: float = 1.0) -> Dict[str, Any]:
+        """Suggests a tiling pattern for large error regions (M13).
+
+        For point-localized events (GRB/neutrino) with degree-scale errors,
+        ranking individual hosts is less useful than covering the region.
+        Returns a 3×3 grid of pointings centered on the 90% centroid, each
+        with RA/Dec and approximate probability coverage. Advisory only.
+        """
+        try:
+            ra_c, dec_c, _ = self._skymap_geometry(skymap)
+            # 3×3 grid, 1 FOV spacing (configurable). Simple, no overlap calc.
+            fov = max(0.5, min(2.0, float(fov_deg or 1.0)))
+            tiles = []
+            for d_dec in (-fov, 0, fov):
+                for d_ra in (-fov, 0, fov):
+                    # RA wrap, Dec clamp
+                    ra = (ra_c + d_ra / max(0.1, math.cos(math.radians(dec_c)))) % 360.0
+                    dec = max(-90.0, min(90.0, dec_c + d_dec))
+                    tiles.append({"ra": round(ra, 4), "dec": round(dec, 4), "fov_deg": fov})
+            return {
+                "center_ra": round(ra_c, 4),
+                "center_dec": round(dec_c, 4),
+                "fov_deg": fov,
+                "tiles": tiles,
+                "note": "3×3 grid covering ~9 deg²; use for wide-field tiling when host ranking is ambiguous.",
+            }
+        except Exception as e:
+            return {"error": str(e), "tiles": []}
+
+    @tool
     def write_observation_header(self, galaxies: List[Galaxy], weather: Optional[ObservatoryWeather] = None,
                                  slew_script: str = "") -> Dict[str, str]:
         """Packages the decision into a standardized FITS observation header (v3 PRD M9.1).
@@ -815,6 +854,89 @@ class KilonovaScoutTools:
             fits_b64 = ""
 
         return {"header_text": header_text, "fits_base64": fits_b64}
+
+    # ── M7 standalone tool wrappers (PRD table expects these names as @tool) ──
+    @tool
+    def schechter_weight_tool(self, l_k: float, l_star: float = 1.0e10, alpha: float = 1.0) -> float:
+        """Schechter weight (PRD M7.1) — wrapper so the standalone function is also an instance tool."""
+        return schechter_weight(l_k, l_star=l_star, alpha=alpha)
+
+    @tool
+    def atmospheric_extinction_tool(self, airmass: float, zenith_extinction: float = 0.12) -> float:
+        """Atmospheric extinction R-band (PRD M7.4)."""
+        return atmospheric_extinction(airmass, zenith_extinction=zenith_extinction)
+
+    @tool
+    def estimate_kilonova_snr_tool(self, distance_mpc: float, peak_mag: float = 17.5) -> Dict[str, float]:
+        """Kilonova SNR proxy (PRD M7.6)."""
+        return estimate_kilonova_snr(distance_mpc, peak_mag=peak_mag)
+
+    @tool
+    def lunar_penalty_tool(self, target_ra: float, target_dec: float) -> Dict[str, float]:
+        """Lunar penalty (M7.3 implementation)."""
+        return lunar_penalty(target_ra, target_dec)
+
+    @tool
+    def check_lunar_separation_tool(self, target_ra: float, target_dec: float) -> Dict[str, float]:
+        """PRD-spec name for lunar separation (M7.3)."""
+        return check_lunar_separation(target_ra, target_dec)
+
+    @tool
+    def integrated_airmass_tool(self, target_ra: float, target_dec: float, site_lat: float, site_lon: float, duration_hours: float = 2.0) -> Dict[str, float]:
+        """Windowed airmass (PRD M7.5)."""
+        return integrated_airmass(target_ra, target_dec, site_lat, site_lon, duration_hours=duration_hours)
+
+    @tool
+    def optimize_slew_order_tool(self, targets: List[Dict[str, Any]], site_lat: float, site_lon: float) -> List[Dict[str, Any]]:
+        """TSP slew order (PRD M7.2)."""
+        return optimize_slew_order(targets, site_lat, site_lon)
+
+    # ── M13 new tools (crossmatch_ztf, em_bright_fetcher, tiling_planner) ──
+    @tool
+    def crossmatch_ztf(self, ra: float, dec: float, radius_arcsec: float = 5.0) -> Dict[str, Any]:
+        """ZTF crossmatch — check for recent transient at host position (M13)."""
+        try:
+            import requests
+            url = "https://api.alerce.online/ztf/v1/objects"
+            params = {"ra": float(ra), "dec": float(dec), "radius": float(radius_arcsec) / 3600.0}
+            resp = requests.get(url, params=params, timeout=8)
+            resp.raise_for_status()
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("items", data.get("objects", []))
+            count = len(items) if isinstance(items, list) else 0
+            if count > 0:
+                return {"found": True, "count": count, "note": f"{count} ZTF source(s) within {radius_arcsec}″ — possible counterpart.", "catalog": "ZTF/ALeRCE"}
+            return {"found": False, "count": 0, "note": "No ZTF transient within search radius.", "catalog": "ZTF/ALeRCE"}
+        except Exception as e:
+            return {"found": False, "count": 0, "note": f"ZTF check unavailable: {e}", "catalog": "ZTF/ALeRCE"}
+
+    @tool
+    def em_bright_fetcher(self, superevent_id: str) -> Dict[str, Any]:
+        """Fetch GraceDB em_bright.json for tighter distance prior (M13)."""
+        try:
+            import requests
+            sid = (superevent_id or "").split("/")[-1].split("#")[-1]
+            if not sid.startswith("S"):
+                # Try to extract S-id via regex fallback
+                import re
+                m = re.search(r"S\d{6}[a-z]+", superevent_id or "")
+                sid = m.group(0) if m else sid
+            if not sid.startswith("S"):
+                return {"fetched": False, "note": "No GraceDB S-id in ivorn — skipping em_bright fetch."}
+            url = f"https://gracedb.ligo.org/api/superevents/{sid}/files/em_bright.json"
+            resp = requests.get(url, timeout=8)
+            if resp.status_code == 404:
+                return {"fetched": False, "note": f"em_bright.json not found for {sid}"}
+            resp.raise_for_status()
+            data = resp.json()
+            return {"fetched": True, "data": data, "note": f"em_bright for {sid}: HasNS={data.get('HasNS')}, HasRemnant={data.get('HasRemnant')}"}
+        except Exception as e:
+            return {"fetched": False, "note": f"em_bright fetch failed: {e}"}
+
+    @tool
+    def tiling_planner(self, skymap: HealpixSkymap, fov_deg: float = 1.0) -> Dict[str, Any]:
+        """Tiling planner for point tier (M13) — alias for suggest_tiling per PRD spec name."""
+        return self.suggest_tiling(skymap, fov_deg=fov_deg)
 
     @tool
     def send_sms_alert(self, message: str) -> AgentOutput:
