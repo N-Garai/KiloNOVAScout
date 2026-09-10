@@ -754,8 +754,10 @@ async def api_run_events(run_id: str):
             try:
                 step = await asyncio.wait_for(queue.get(), timeout=15.0)
                 yield f"data: {step.model_dump_json()}\n\n"
-                # Terminal marker closes the stream cleanly from server side.
-                if step.tool_name == "run" and step.status in ("completed", "failed", "skipped"):
+                # Terminal marker (step 999, finish_run) closes the stream.
+                # Step 0 "run created" must not close it, or the UI freezes
+                # at 1 event (Render buffers the rest).
+                if step.step == 999 and step.tool_name == "run" and step.status in ("completed", "failed", "skipped"):
                     break
             except asyncio.TimeoutError:
                 yield ": keepalive\n\n"
@@ -766,7 +768,7 @@ async def api_run_events(run_id: str):
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },

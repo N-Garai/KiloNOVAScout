@@ -423,10 +423,11 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
         const step = JSON.parse(evt.data)
         setStreamState('live')
         mergeStep(step)
-        // Terminal run-finished marker (emitted by finish_run): stop the
-        // stream and pull the complete run state.
+        // Terminal run-finished marker (step 999, emitted by finish_run).
+        // Step 0 "run created" is also tool_name run + completed — must not
+        // close the stream, otherwise the UI freezes at 1 event.
         const terminal = ['completed', 'failed', 'skipped'].includes(step.status)
-        if (!finished && step.tool_name === 'run' && terminal) {
+        if (!finished && step.tool_name === 'run' && step.step === 999 && terminal) {
           finished = true
           evtSource.close()
           setStreamState('closed')
