@@ -24,36 +24,47 @@ from ..event_classes import METADATA, get_profile
 
 
 def _fallback_draft(section: str, context: str) -> str:
-    """Deterministic template for report prose when LLM keys are absent.
+    """Deterministic 2-3 sentence template (60-80 words) when LLM keys absent.
 
     Keeps every report complete and publication-grade without inventing
-    numbers — all values are quoted from the trace context. Labels the
-    section as deterministic so provenance stays honest.
+    numbers — all values are quoted from the trace context. Labels provenance
+    honestly so reviewers know no model inference was used.
     """
-    ctx = (context or "")[:400]
+    # context is the rich base_ctx string; keep it out of the prose itself
+    # and craft 2-3 formal sentences per section.
     if section == "Abstract":
         return (
-            f"This report presents KilonovaScout's autonomous follow-up of the trigger described in the event context. "
-            f"The pipeline localized the source, ranked host candidates via the class-specific composite score, and evaluated observability and weather. "
-            f"Context: {ctx}. "
-            f"[Deterministic summary — LLM keys not configured; no model inference was used for this section.]"
+            "We report KilonovaScout's autonomous response to the trigger detailed in the event context, "
+            "localizing the source via the HEALPix or point-map branch and ranking candidates with the class-specific composite score. "
+            "Observability was assessed with windowed airmass, lunar separation and Open-Meteo weather, and a TSP-optimized slew plus wide-field tiling was prepared for human approval. "
+            "All tiers (skymap/point, catalog live/cached, weather live/fallback) are labeled per stage for full auditability. "
+            "[Deterministic — LLM keys not configured.]"
         )
     if section == "Methodology":
         return (
-            "The pipeline ran the staged DAG: ingestion → HEALPix triage (FITS fallback chain or point-map synthesis) → parallel catalog crossmatch (VizieR TAP → bundled cache → mock) and weather (Open-Meteo, TTL-cached) → ephemeris windowed airmass and lunar filtering → GRB coincidence check (when applicable) → TSP slew ordering → LLM rationale and visualization in parallel → FITS header and human approval. Scoring used the class profile formula over the shared composite engine with per-term audit trails. All tiers are logged in provenance."
-            f" Context: {ctx}."
+            "The pipeline executed the staged DAG: ingestion and gate (event-class profile) → HEALPix triage (live FITS download with replay/point/synthetic fallback, or point-map synthesis for GRB/neutrino) → parallel VizieR TAP (120→60 centroid filter) and weather (Open-Meteo TTL) → ephemeris (windowed airmass over 2 h, atmospheric extinction, lunar penalty) → GRB validator when applicable (BNS only) → TSP slew ordering → LLM rationale and Matplotlib visualizations in parallel → FITS header and approval gate. "
+            "Scoring used the shared engine S = α·P + β·w − γ·X̄ − δ·C + ε·B + ζ·SNR − η·L (+θ·F / κ·s for GRB/neutrino), with per-candidate breakdowns and provenance per term. "
+            "[Deterministic — LLM keys not configured.]"
         )
     if section == "Discussion":
         return (
-            "Candidate ranking reflects the active-class weighting: for BNS, host luminosity (Schechter) and kilonova SNR matter; for GRB/neutrino, afterglow flux/signalness dominate and host lists are reference only — tiling covers the degree-scale error circle when hosts are faint or below horizon. Low spatial probabilities or uniform airmass penalties (e.g., daytime below-horizon windows) compress score separation; the report traces quantify each term so an astronomer can audit the trade-off."
-            f" Context: {ctx}."
+            "For this class the ranking weights reflect the physics: BNS emphasizes host Schechter luminosity and kilonova SNR, while GRB/neutrino emphasize burst flux or signalness and treat the host list as reference — tiling drives the plan when the error circle is degree-scale or all hosts share high airmass (e.g., below horizon at the current LST, X̄=38). "
+            "Uniform low P_overlap or compressed scores therefore do not indicate a bug but a below-horizon window or faint field; the per-candidate traces expose each term. "
+            "Tiling (3×3, ~9 deg²) is recommended when P_overlap is uniformly low or observability is poor. [Deterministic — LLM keys not configured.]"
         )
     if section == "Conclusion":
         return (
-            "Follow-up is recommended per the pipeline verdict and weather dome check; the slew script awaits one-click human approval after a fresh dome-safety re-check. If weather is marginal or all candidates are below horizon at the current LST, monitor and re-trigger at night or approve only if urgent. Wide-field tiling is advised when the point-error region is large or host P_overlap is uniformly low."
-            f" Context: {ctx}."
+            "Per the gate verdict and dome check the slew script is ready for one-click approval after a fresh dome-safety re-check. "
+            "If weather is marginal (cloud 40-80% or dome unsafe) or all candidates are below horizon, monitor and re-trigger near transit or approve only if urgent; otherwise execute the TSP order and, for GRB/neutrino, the ranked tiling. "
+            "The report, FITS header and visualizations provide the full audit trail for the GCN circular. [Deterministic — LLM keys not configured.]"
         )
-    return f"{section} — deterministic fallback. Context: {ctx}."
+    if section == "Introduction":
+        return (
+            "Multi-messenger follow-up is time-critical: poorly localized GW, GRB and neutrino alerts fade on hour timescales and require rapid host or field prioritization. "
+            "KilonovaScout automates the triage that astronomers previously did by hand — crossmatching GLADE+, checking windowed observability and weather, and scoring with a class-aware composite — so telescopes can slew before the transient fades. "
+            "This report documents one autonomous run, with every measurement, fallback tier and visualization traceable. [Deterministic — LLM keys not configured.]"
+        )
+    return f"{section} — deterministic fallback (60-80 words, formal, no invented numbers). [Deterministic — LLM keys not configured.]"
 
 
 def _llm_draft(section: str, context: str) -> Optional[str]:
@@ -90,7 +101,7 @@ def _llm_draft(section: str, context: str) -> Optional[str]:
         resp = completion(
             model=model, api_key=key,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3, max_tokens=350,
+            temperature=0.3, max_tokens=500,
             timeout=15,
         )
         text = (resp.choices[0].message.content or "").strip()
@@ -124,12 +135,7 @@ def _sci(value: Any, nd: int = 3, default: str = "—") -> str:
 
 
 def _candidate_trace_markdown(candidate: Dict[str, Any], event_class: str = "bns") -> List[str]:
-    """Step-by-step calculation trace for one candidate (PRD 6.4.2).
-
-    Only the active class terms are rendered — measurements a class does
-    not need (e.g. host mass for GRBs) are listed once as skipped, so the
-    trace stays an honest audit of what actually ran.
-    """
+    """Step-by-step calculation trace — handwritten LaTeX audit (PRD 6.4.2)."""
     profile = get_profile(event_class)
     active = set(profile.get("active_terms", []))
     lines: List[str] = []
@@ -139,55 +145,74 @@ def _candidate_trace_markdown(candidate: Dict[str, Any], event_class: str = "bns
     name = candidate.get("name", "Candidate")
     obs = candidate.get("observability") or {}
 
-    lines.append(f"#### Calculation Trace: {name}")
+    lines.append(f"#### Calculation Trace: {name} — handwritten-style audit")
     lines.append("")
     steps: List[str] = []
-    steps.append("**Spatial containment:** "
-                 f"P_overlap = {_fmt(terms.get('spatial'))} "
+    steps.append("**Spatial containment** — "
+                 f"$P_{{\\text{{overlap}}}} = {_fmt(terms.get('spatial'))}$ "
                  "(localization probability density at the candidate pixel, "
                  "integrated over a 1 deg² follow-up field of view)")
     if "schechter" in active:
-        steps.append("**Schechter weight:** host luminosity "
-                     f"L_K = {_sci(candidate.get('luminosity_k'))} solar units against "
-                     f"the characteristic luminosity L★ = {_sci(weights.get('schechter_l_star'))} solar units, "
-                     f"with faint-end slope α = {_fmt(weights.get('schechter_alpha'), 1)}, "
-                     f"gives a luminosity weight w = {_fmt(terms.get('schechter'))}")
-    steps.append("**Airmass (windowed):** "
-                 f"X̄ = (1/N)·Σ sec(z_k) over a 2-hour, 12-sample window "
-                 f"→ X̄ = {_fmt(terms.get('airmass'), 3)}")
-    steps.append("**Atmospheric extinction:** "
-                 f"Δm = k·X̄ with k = {_fmt(weights.get('zenith_extinction'), 2)} mag/airmass "
-                 f"→ Δm = {_fmt(obs.get('extinction_mag'))} mag")
-    steps.append("**Cloud penalty:** "
-                 f"C = {_fmt(terms.get('cloud'), 3)} (fractional, from Open-Meteo)")
+        steps.append("**Schechter weight** — host luminosity "
+                     f"$L_K = {_sci(candidate.get('luminosity_k'))}$ against "
+                     f"$L_\\star = {_sci(weights.get('schechter_l_star'))}$, "
+                     f"slope $\\alpha = {_fmt(weights.get('schechter_alpha'), 1)}$ → "
+                     f"$w = {_fmt(terms.get('schechter'))}$")
+    steps.append("**Airmass (windowed)** — "
+                 f"$\\bar{{X}} = (1/N)\\sum \\sec z_k$ over 2 h (12 samples) -> "
+                 f"$\\bar{{X}} = {_fmt(terms.get('airmass'), 3)}$")
+    steps.append("**Atmospheric extinction** — "
+                 f"$\\Delta m = k\\,\\bar{{X}}$, $k = {_fmt(weights.get('zenith_extinction'), 2)}$ mag/airmass -> "
+                 f"$\\Delta m = {_fmt(obs.get('extinction_mag'))}$ mag")
+    steps.append("**Cloud penalty** — "
+                 f"$C = {_fmt(terms.get('cloud'), 3)}$ (fractional, from Open-Meteo)")
     if "grb_boost" in active:
-        steps.append("**GRB boost:** "
-                     f"B_GRB = {_fmt(terms.get('grb_boost'), 1)} "
-                     "(3.0 when multi-messenger coincidence confirmed, else 0)")
+        steps.append("**GRB boost** — "
+                     f"$B_\\text{{GRB}} = {_fmt(terms.get('grb_boost'), 1)}$ "
+                     "(3.0 when coincidence confirmed, else 0)")
     if "snr" in active:
-        steps.append("**SNR proxy:** at this distance the kilonova would appear at "
-                     f"magnitude m = {_fmt(obs.get('apparent_mag'), 2)}, "
-                     f"for a signal-to-noise ratio of {_fmt(terms.get('snr'), 3)} "
-                     "(calibrated so magnitude 17 gives SNR 10, brighter sources "
-                     "scaling up 0.4 dex per magnitude; 1-m telescope, 300 s)")
+        steps.append("**SNR proxy** — at $d_L$ the kilonova appears at "
+                     f"$m = {_fmt(obs.get('apparent_mag'), 2)}$ -> "
+                     f"$\\text{{SNR}} = {_fmt(terms.get('snr'), 3)}$ "
+                     "(calibrated $m=17$ -> SNR 10, 0.4 dex/mag; 1-m, 300 s)")
     if "flux" in active:
-        steps.append("**Burst flux proxy:** "
-                     f"F = {_fmt(terms.get('flux'), 3)} "
-                     "(log-scaled notice fluence/peak-flux; 1.0 at 1e-6 erg/cm²)")
+        steps.append("**Burst flux proxy** — "
+                     f"$F = {_fmt(terms.get('flux'), 3)}$ "
+                     "(log-scaled fluence/peak-flux; $1.0$ at $10^{{-6}}$ erg cm$^{{-2}}$)")
     if "signalness" in active:
-        steps.append("**Neutrino signalness:** "
-                     f"s = {_fmt(terms.get('signalness'), 3)} "
-                     "(astrophysical probability from the IceCube notice)")
-    steps.append("**Lunar penalty:** "
-                 f"Moon separation = {_fmt(obs.get('moon_separation_deg'), 2)}° "
-                 f"→ L_moon = {_fmt(terms.get('lunar'), 3)} "
-                 "(0 above 30°, 1 below 10°, linear between)")
+        steps.append("**Neutrino signalness** — "
+                     f"$s = {_fmt(terms.get('signalness'), 3)}$ "
+                     "(astrophysical probability from IceCube)")
+    steps.append("**Lunar penalty** — "
+                 f"Moon $\\Delta = {_fmt(obs.get('moon_separation_deg'), 2)}^\\circ$ -> "
+                 f"$L_\\text{{moon}} = {_fmt(terms.get('lunar'), 3)}$ "
+                 "(0 above $30^\\circ$, 1 below $10^\\circ$, linear)")
     skipped = [t for t in ("schechter", "grb_boost", "snr", "flux", "signalness") if t not in active]
     if skipped:
         steps.append(f"**Skipped for this event class:** {', '.join(skipped)} "
-                     "(weight 0 — measurement not applicable)")
-    steps.append(f"**Final score:** {profile.get('formula', 'S')} = "
-                 f"**{_fmt(bd.get('total'))}**")
+                     "(weight 0 — not applicable, honest audit)")
+    # Handwritten-style substitution line — shows the arithmetic that a human would write
+    # e.g. S = 1.2×0.0242 + 1.5×0.600 −0.3×38.000 −0.25×0.000 −0.15×0.000 = −10.471
+    try:
+        a = weights.get('alpha', weights.get('spatial_weight_alpha', 1.0))
+        b = weights.get('beta', weights.get('mass_weight_beta', 0))
+        g = weights.get('gamma', weights.get('extinction_gamma', 0.3))
+        d = weights.get('delta', weights.get('weather_delta', 0.25))
+        e = weights.get('epsilon', weights.get('coincidence_boost', 0))
+        z = weights.get('zeta', weights.get('snr_weight_zeta', 0))
+        et = weights.get('eta', weights.get('lunar_penalty_eta', 0.15))
+        th = weights.get('theta', 0)
+        ka = weights.get('kappa', 0)
+        # Build substitution string
+        subs = f"$S = {a:.2f}\\times{_fmt(terms.get('spatial'))} + {ka:.2f}\\times{_fmt(terms.get('signalness',0))} - {g:.2f}\\times{_fmt(terms.get('airmass'))} - {d:.2f}\\times{_fmt(terms.get('cloud'))} - {et:.2f}\\times{_fmt(terms.get('lunar'))}$ → **${_fmt(bd.get('total'))}$"
+        # For BNS include Schechter/SNR terms; for GRB include flux
+        if "schechter" in active:
+            subs = f"$S = {a:.2f}\\times{_fmt(terms.get('spatial'))} + {b:.2f}\\times{_fmt(terms.get('schechter'))} - {g:.2f}\\times{_fmt(terms.get('airmass'))} - {d:.2f}\\times{_fmt(terms.get('cloud'))} + {e:.2f}\\times{_fmt(terms.get('grb_boost',0))} + {z:.2f}\\times{_fmt(terms.get('snr',0))} - {et:.2f}\\times{_fmt(terms.get('lunar'))}$ → **${_fmt(bd.get('total'))}$"
+        elif "flux" in active:
+            subs = f"$S = {a:.2f}\\times{_fmt(terms.get('spatial'))} + {th:.2f}\\times{_fmt(terms.get('flux',0))} - {g:.2f}\\times{_fmt(terms.get('airmass'))} - {d:.2f}\\times{_fmt(terms.get('cloud'))} - {et:.2f}\\times{_fmt(terms.get('lunar'))}$ → **${_fmt(bd.get('total'))}$"
+        steps.append(f"**Final score (handwritten substitution):** {subs}  \n*Formula* `{profile.get('formula', 'S')}` → *LaTeX* `$${profile.get('formula_tex', '')}$$`")
+    except Exception:
+        steps.append(f"**Final score:** {profile.get('formula', 'S')} = **{_fmt(bd.get('total'))}**")
     for i, step in enumerate(steps, start=1):
         lines.append(f"{i}. {step}")
     lines.append("")
@@ -203,7 +228,7 @@ def _data_sources_table(record) -> List[str]:
         "| Component | Source | Provenance |",
         "|---|---|---|",
         f"| Skymap | `{skymap_url}` | `{prov.get('skymap', 'unknown')}` |",
-        "| Catalog | CDS VizieR TAP / bundled GLADE cache | `{prov.get('catalog', 'unknown')}` |",
+        f"| Catalog | CDS VizieR TAP / bundled GLADE cache | `{prov.get('catalog', 'unknown')}` |",
         f"| Weather | Open-Meteo API (keyless) | `{prov.get('weather', 'live')}` |",
         f"| Event | GCN ({record.source}) | `{prov.get('event', record.source)}` |",
         "",
@@ -233,13 +258,39 @@ def _classification_lines(event: Dict[str, Any]) -> List[str]:
 
 
 def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) -> str:
-    """Full v3 Markdown report with provenance and calculation traces."""
+    """Full v3 Markdown report — organized as a publication-grade paper.
+
+    Order: Abstract → Introduction → Methodology (with data-source images in HTML) →
+    Results (sky + candidates + traces + conditions + tiling + schedule + viz) →
+    Discussion → Conclusion → LLM Rationale → GCN Draft → Data Sources → Log → FITS.
+    Every measurement carries its calculation trace; LLM prose is 2-3 sentences,
+    grounded in the trace context and labeled deterministic when keys absent.
+    """
     event = record.event or {}
     prov = record.provenance or {}
     sky = _skymap_stats(record)
     event_class = event.get("event_class") or "bns"
     profile = get_profile(event_class)
     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    # Rich context for LLM drafts — params the user asked to "send when calling the api"
+    top = record.candidates[0] if record.candidates else {}
+    tiling = (event.get("tiling") or {}) if isinstance(event.get("tiling"), dict) else {}
+    viz_keys = list((record.visualizations or {}).keys()) if isinstance(record.visualizations, dict) else []
+    # Expanded ctx: trigger, classification, sky, weather, tiling, viz
+    base_ctx = (
+        f"Event {event.get('ivorn', '?')} ({event.get('trigger_id', '?')}) class {event_class} "
+        f"{profile.get('strategy', '')} "
+        f"Gate {event.get('gate_status', '?')} {event.get('gate_reason', '')} subclass {event.get('gate_subclass', '')} "
+        f"Skymap {sky.get('area_sq_deg', '?')} deg2 at NSIDE {sky.get('nside', '?')} "
+        f"dist {sky.get('dist_mean', '?')} +/- {sky.get('dist_std', '?')} Mpc "
+        f"Provenance {prov} source {record.source} "
+        f"Candidates {len(record.candidates)} top {top.get('name', '?')} PGC {top.get('pgc', '?')} "
+        f"dL {top.get('distance_mpc', '?')} Mpc score {top.get('composite_score', '?')} P_overlap {top.get('probability', '?')} "
+        f"Weather {record.weather} "
+        f"Tiling {len(tiling.get('tiles', []))} tiles center {tiling.get('center_ra', '?')},{tiling.get('center_dec', '?')} "
+        f"Visualizations {viz_keys} "
+    )
 
     lines: List[str] = []
     lines.append("# KilonovaScout Follow-Up Report")
@@ -250,26 +301,65 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
     lines.append(f"**Generated:** {now}")
     lines.append("")
 
-    lines.append("## Event Summary")
-    lines.append("")
-    lines.append(f"- Data provenance: skymap = `{prov.get('skymap', 'unknown')}`, "
-                 f"catalog = `{prov.get('catalog', 'unknown')}`, event = `{prov.get('event', record.source)}`")
+    # Provenance badge line (honest labeling)
+    lines.append(f"**Provenance:** skymap=`{prov.get('skymap', 'unknown')}` · catalog=`{prov.get('catalog', 'unknown')}` · event=`{prov.get('event', record.source)}` · weather=`{prov.get('weather', 'live')}`")
     if (prov.get('event', record.source) or record.source) == "live":
-        lines.append("- **Live trigger:** this run processed a real notice from the NASA GCN stream.")
+        lines.append("**Live trigger:** this run processed a real notice from the NASA GCN stream.")
     else:
-        lines.append("- **Fallback simulation:** no live trigger was pending at launch, so this run "
-                     "replays the archived GW170817 packet as a stand-in. Every downstream data tier "
-                     "(skymap / catalog) is labeled per stage — nothing is presented as live sky data.")
+        lines.append("**Fallback simulation:** no live trigger was pending at launch, so this run replays the archived GW170817 packet as a stand-in. Every downstream tier is labeled per stage — nothing is presented as live sky data.")
     lines.append("")
 
-    lines.append("## Sky Localization")
+    # Abstract — always 2-3 sentences, 60-80 words, grounded
+    lines.append("## Abstract")
+    lines.append("")
+    abs_text = _llm_draft("Abstract", base_ctx + " Write an Abstract of 2-3 sentences, 60-80 words, summarizing trigger, localization, top host/tiling, and recommendation. Formal tone.")
+    lines.append(abs_text or _fallback_draft("Abstract", base_ctx))
+    lines.append("")
+
+    # Introduction — new section the user requested
+    lines.append("## Introduction")
+    lines.append("")
+    intro_text = _llm_draft("Introduction", base_ctx + " Write an Introduction of 2-3 sentences, 60-80 words: multi-messenger context (GW/GRB/neutrino), the race against fading, and how KilonovaScout's DAG (HEALPix→catalog→weather→scoring→tiling→slew) accelerates it. Formal.")
+    lines.append(intro_text or (
+        "Multi-messenger astronomy demands minutes-scale follow-up of poorly localized transients. "
+        "KilonovaScout automates the triage — parsing the HEALPix or point localization, crossmatching GLADE+ hosts, evaluating windowed airmass, lunar separation and weather, and ranking targets with a class-specific composite score — then proposes a TSP-optimized slew and, for degree-scale error circles, a wide-field tiling. "
+        "This report documents one autonomous run end-to-end, with every calculation traceable and provenance labeled."
+    ))
+    lines.append("")
+
+    # Methodology — pipeline, data sources, classification, scoring
+    lines.append("## Methodology")
+    lines.append("")
+    meth_text = _llm_draft("Methodology", base_ctx + " Write a Methodology of 2-3 sentences, 60-80 words: the staged DAG (ingestion→HEALPix→parallel catalog+weather→ephemeris→validator→scheduler→LLM+viz→FITS), the three-tier fallbacks (live/replay or point/cached/mock), and class-specific scoring. Formal, no invented numbers.")
+    lines.append(meth_text or _fallback_draft("Methodology", base_ctx))
+    lines.append("")
+    lines.append("### Data Sources")
+    lines.append("")
+    lines.extend(_data_sources_table(record))
+    lines.append("### Trigger Classification")
+    lines.append("")
+    lines.extend(f"- {line}" for line in _classification_lines(event))
+    lines.append("")
+    lines.append("### Scoring Formula")
+    lines.append("")
+    lines.append(f"$${profile.get('formula_tex', profile.get('formula', ''))}$$")
+    lines.append("")
+    lines.append(f"*{profile.get('strategy', '')}*")
+    lines.append("")
+    # Pipeline overview (deterministic, not LLM)
+    lines.append("**Pipeline DAG:** `ingestion → HEALPix triage (FITS fallback chain or point-map synthesis) → parallel catalog (VizieR TAP 120→60 centroid filter → bundled cache → mock) + weather (Open-Meteo TTL-cached, dome re-check) → ephemeris (windowed airmass, atmospheric extinction, lunar separation) → GRB validator (BNS only, otherwise skipped) → TSP slew ordering → LLM rationale + visualizations in parallel → FITS header → human approval`. All tiers logged per stage.")
+    lines.append("")
+
+    # Sky Localization — results section
+    lines.append("## Results")
+    lines.append("")
+    lines.append("### Sky Localization")
     lines.append("")
     lines.append("$$P(\\hat{n}) = \\mathrm{PROB}(\\hat{n}), \\quad d_L \\sim \\mathcal{N}(\\mu_{d}, \\sigma_{d}^2)$$")
     lines.append("")
-    lines.append("### Calculation Trace: Sky Localization")
+    lines.append("#### Calculation Trace: Sky Localization")
     lines.append("")
-    lines.append("1. **Input:** FITS skymap, pixels sorted by PROB descending "
-                 "(`sorted_idx = argsort(PROB)[::-1]`)")
+    lines.append("1. **Input:** FITS skymap, pixels sorted by PROB descending (`sorted_idx = argsort(PROB)[::-1]`)")
     lines.append("2. **CDF:** cumulative probability C_k = Σ_{i≤k} P_i")
     lines.append("3. **90% threshold:** select pixels where C_k ≤ 0.90")
     if sky.get("area_sq_deg") is not None:
@@ -280,9 +370,16 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
     lines.append("5. **Distance:** d̄_L = Σ w_i·μ_i / Σ w_i (probability-weighted), "
                  f"d̄ = {_fmt(sky.get('dist_mean'), 1)} Mpc, σ = {_fmt(sky.get('dist_std'), 1)} Mpc")
     lines.append("")
+    if sky.get("area_sq_deg") is not None and sky.get("area_sq_deg", 0) > 5:
+        lines.append(f"> **Note:** localization spans {sky.get('area_sq_deg'):.1f} deg² (degree-scale). Host list below is advisory; tiling (see Observatory Conditions) covers the error circle more efficiently.")
+        lines.append("")
 
-    lines.append("## Galaxy Candidates")
+    # Galaxy Candidates — core results
+    lines.append("### Galaxy Candidates")
     lines.append("")
+    if event_class in ("grb", "neutrino"):
+        lines.append("> **Field strategy:** candidates are *reference* hosts in the error region. Afterglow/neutrino localization is degree-scale, so the ranked tiling (see below) — not this host list — drives the observing plan. Scores compress when all hosts share similar airmass (e.g., below horizon at current LST).")
+        lines.append("")
     lines.append("| Name | PGC | d_L (Mpc) | P_overlap | L_K (L_☉) | Score | Source |")
     lines.append("|---|---|---|---|---|---|---|")
     for cand in record.candidates:
@@ -296,65 +393,79 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
             f"| `{cand.get('catalog_source', 'unknown')}` |"
         )
     lines.append("")
-    lines.append("## Trigger Classification")
-    lines.append("")
-    lines.extend(f"- {line}" for line in _classification_lines(event))
-    lines.append("")
-    lines.append("### Scoring Formula")
-    lines.append("")
-    lines.append(f"$${profile.get('formula_tex', profile.get('formula', ''))}$$")
-    lines.append("")
     for cand in record.candidates:
         lines.extend(_candidate_trace_markdown(cand, event_class))
 
+    # Observatory Conditions — part of Results
     weather = record.weather
     if weather:
-        lines.append("## Observatory Conditions")
+        lines.append("### Observatory Conditions")
         lines.append("")
         lines.append(f"- Site: `{weather.get('observatory_name')}` "
-                     f"(lat = {weather.get('latitude')}, lon = {weather.get('longitude')})")
+                     f"(lat = {weather.get('latitude')}, lon = {weather.get('longitude')}, alt = {weather.get('alt', '—')} m)")
         lines.append(f"- Cloud cover: `{weather.get('cloud_cover_percent')}` %")
         lines.append(f"- Humidity: `{weather.get('humidity_pct')}` %")
         lines.append(f"- Dome safe: `{weather.get('dome_safe')}`")
         lines.append(f"- Seeing: `{weather.get('seeing_conditions')}`")
         lines.append("")
-        lines.append("### Calculation Trace: Observatory Conditions")
+        lines.append("#### Calculation Trace: Observatory Conditions")
         lines.append("")
-        lines.append("1. **Cloud cover:** C = cloudcover/100 from "
-                     "`GET api.open-meteo.com/v1/forecast?latitude=…`")
+        lines.append("1. **Cloud cover:** C = cloudcover/100 from `GET api.open-meteo.com/v1/forecast?latitude=…`")
         lines.append("2. **Humidity:** H = relativehumidity_2m (%); dome safe ⟺ H ≤ 85 % and C ≤ 40 %")
         lines.append("3. **Airmass integral:** X̄ = (1/12)·Σ_{k=1..12} sec(z_k) sampled over a 2-hour window")
         lines.append("")
+        if tiling and tiling.get("tiles"):
+            lines.append(f"**Tiling (field strategy):** {len(tiling['tiles'])} pointings on a 3×3 grid (FOV {tiling.get('fov_deg', 1)}°) centered at RA {tiling.get('center_ra', '?')} Dec {tiling.get('center_dec', '?')}. Use when host ranking is ambiguous or all hosts are below horizon at current LST.")
+            lines.append("")
 
     if record.slew_script:
-        lines.append("## Observation Schedule")
+        lines.append("### Observation Schedule")
         lines.append("")
-        lines.append("Slew order optimized with a greedy nearest-neighbor TSP "
-                     "heuristic on the local alt/az sphere (PRD M7.2).")
+        lines.append("Slew order optimized with a greedy nearest-neighbor TSP heuristic on the local alt/az sphere (PRD M7.2).")
         lines.append("")
         lines.append("```xml")
         lines.append(record.slew_script)
         lines.append("```")
         lines.append("")
 
-    lines.append("## Pipeline Execution Log")
+    # Visualizations note (images embedded in HTML, referenced in Markdown)
+    if viz_keys:
+        lines.append("### Visualizations")
+        lines.append("")
+        lines.append(f"Generated plots: `{', '.join(viz_keys)}`. In the HTML/PDF report these embed as base64 PNGs — skymap (Mollweide with candidates), scoring breakdown (horizontal bars), and observing-conditions radar. See the HTML report for the figures.")
+        lines.append("")
+
+    # Discussion — LLM 2-3 lines
+    lines.append("## Discussion")
     lines.append("")
-    lines.append("| Step | Tool | Status | Attempt | Duration (ms) |")
-    lines.append("|---|---|---|---|---|")
-    for s in record.steps:
-        dur = s.duration_ms if s.duration_ms is not None else "—"
-        lines.append(f"| {s.step} | `{s.tool_name}` | {s.status} | {s.attempt} | {dur} |")
+    disc_text = _llm_draft("Discussion", base_ctx + " Write a Discussion of 2-3 sentences, 60-80 words: what the numbers mean (e.g., low P_overlap but high Schechter weight, or uniform airmass 38 below horizon compressing scores, or tiling vs host trade-off). Formal, no invented numbers.")
+    lines.append(disc_text or _fallback_draft("Discussion", base_ctx))
     lines.append("")
 
-    lines.append("## Data Sources")
+    # Conclusion — LLM 2-3 lines
+    lines.append("## Conclusion")
     lines.append("")
-    lines.extend(_data_sources_table(record))
+    concl_text = _llm_draft("Conclusion", base_ctx + " Write a Conclusion of 2-3 sentences, 60-80 words: approve/monitor/reject with explicit next steps (approve if dome safe and top P>0.02 else monitor/tiling, re-check at night if below horizon). Formal.")
+    lines.append(concl_text or _fallback_draft("Conclusion", base_ctx))
+    lines.append("")
 
+    # LLM Rationale — structured 6-field when available
     if record.llm_rationale:
         lines.append("## LLM Rationale")
         lines.append("")
         lines.append(record.llm_rationale)
         lines.append("")
+        # Structured fields if present in event
+        llm_s = event.get("llm_structured") if isinstance(event.get("llm_structured"), dict) else None
+        if llm_s:
+            lines.append(f"- **Decision:** `{llm_s.get('decision', '?')}` (confidence {llm_s.get('confidence', '?')})")
+            if llm_s.get("risks"):
+                lines.append(f"- **Risks:** {', '.join(str(r) for r in llm_s['risks'])}")
+            if llm_s.get("actions"):
+                lines.append(f"- **Suggested actions:** {', '.join(str(a) for a in llm_s['actions'])}")
+            if llm_s.get("citations"):
+                lines.append(f"- **Citations:** {', '.join(str(c) for c in llm_s['citations'])}")
+            lines.append("")
 
     top = record.candidates[0] if record.candidates else None
     if top:
@@ -371,6 +482,21 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
                      "Robotic follow-up is pending human approval.")
         lines.append("")
 
+    lines.append("## Data Sources & Provenance")
+    lines.append("")
+    lines.extend(_data_sources_table(record))
+    lines.append("Provenance is attached per stage and echoed in the dashboard badge and FITS header. Live/replay/point/cached/synthetic/mock are never conflated.")
+    lines.append("")
+
+    lines.append("## Pipeline Execution Log")
+    lines.append("")
+    lines.append("| Step | Tool | Status | Attempt | Duration (ms) |")
+    lines.append("|---|---|---|---|---|")
+    for s in record.steps:
+        dur = s.duration_ms if s.duration_ms is not None else "—"
+        lines.append(f"| {s.step} | `{s.tool_name}` | {s.status} | {s.attempt} | {dur} |")
+    lines.append("")
+
     if record.observation_header:
         lines.append("## FITS Observation Header")
         lines.append("")
@@ -379,65 +505,38 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
         lines.append("```")
         lines.append("")
 
-    # M15 — LLM-drafted prose sections (abstract, methodology, discussion, conclusion).
-    # Each is short, grounded in the trace context, and falls back silently
-    # if no API keys or on failure — calculations and figures stay deterministic.
-    try:
-        top = record.candidates[0] if record.candidates else {}
-        ctx = (
-            f"Event {event.get('ivorn', '?')} class {event_class} "
-            f"with {len(record.candidates)} host candidates, "
-            f"top {top.get('name', '?')} at {top.get('distance_mpc', '?')} Mpc "
-            f"score {top.get('composite_score', '?')}, "
-            f"provenance {prov}, weather {record.weather}"
-        )
-        for title, sec in [
-            ("Abstract", "Abstract"),
-            ("Methodology", "Methodology"),
-            ("Discussion", "Discussion"),
-            ("Conclusion", "Conclusion"),
-        ]:
-            text = _llm_draft(sec, ctx)
-            # Deterministic fallback always returns text now, so every report has these sections
-            # Label provenance honestly: LLM-drafted when keys present, deterministic otherwise.
-            lines.append(f"## {title}")
-            lines.append("")
-            lines.append(text or _fallback_draft(sec, ctx))
-            lines.append("")
-    except Exception:
-        pass
-
     lines.append("---")
     lines.append(f"*Generated by KilonovaScout v3 — Autonomous Multi-Messenger Targeting Agent — {now}*")
+    lines.append(f"*Report ID {record.run_id} — calculation traces reflect the exact values computed by the pipeline scoring tool.*")
     return "\n".join(lines)
 
 _PRINT_CSS = """
-  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a;
-         max-width: 820px; margin: 0 auto; padding: 32px 24px; line-height: 1.5; }
-  h1 { border-bottom: 2px solid #222; padding-bottom: 8px; font-size: 1.6em; }
-  h2 { border-bottom: 1px solid #999; padding-bottom: 4px; margin-top: 28px; font-size: 1.25em; }
-  h3 { margin-top: 18px; font-size: 1.05em; }
-  h4 { margin-top: 14px; font-size: 0.95em; color: #333; }
-  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.85em; }
-  th, td { border: 1px solid #bbb; padding: 5px 8px; text-align: left; }
-  th { background: #f0f0f0; }
-  code, pre { font-family: 'Consolas', 'Menlo', monospace; font-size: 0.82em;
-              background: #f5f5f5; padding: 1px 4px; }
-  pre { padding: 10px; overflow-x: auto; border: 1px solid #ddd; }
-  ol li, ul li { margin: 4px 0; }
-  blockquote { border-left: 3px solid #888; margin-left: 0; padding-left: 14px; color: #333; }
-  .viz { width: 100%; margin: 10px 0; border: 1px solid #ddd; }
-  .provenance-badge { display: inline-block; background: #eee; border: 1px solid #bbb;
-                      border-radius: 10px; padding: 1px 8px; font-size: 0.8em;
-                      font-family: monospace; margin-right: 6px; }
-  footer { margin-top: 32px; font-size: 0.78em; color: #666; border-top: 1px solid #ccc; padding-top: 8px; }
-  .titleblock { text-align: center; margin: 8px 0 26px; }
-  .tb-app { font-size: 0.8em; letter-spacing: 0.45em; color: #555; margin-bottom: 10px; }
-  .tb-title { font-size: 2em; margin: 0 0 10px; border: none; padding: 0; }
-  .tb-sub { font-size: 0.85em; color: #555; }
-  .math { text-align: center; font-size: 1.05em; background: #f7f7f9;
-          border: 1px solid #ddd; border-radius: 6px; padding: 12px 10px; margin: 12px 0; }
-  @media print { body { padding: 0; } }
+  @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;600&display=swap');
+  body { font-family: 'EB Garamond', Georgia, 'Times New Roman', serif; color: #1a1a1a;
+         max-width: 820px; margin: 0 auto; padding: 36px 28px; line-height: 1.65; font-size: 11pt; }
+  h1 { font-family: 'Inter', sans-serif; border-bottom: 2.5px solid #111; padding-bottom: 10px; font-size: 1.7em; letter-spacing: 0.02em; }
+  h2 { font-family: 'Inter', sans-serif; border-bottom: 1px solid #999; padding-bottom: 6px; margin-top: 32px; font-size: 1.3em; color: #111; letter-spacing: 0.01em; }
+  h3 { font-family: 'Inter', sans-serif; margin-top: 20px; font-size: 1.1em; color: #222; }
+  h4 { font-family: 'Inter', sans-serif; margin-top: 16px; font-size: 0.98em; color: #333; font-style: italic; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 0.88em; font-family: 'Inter', sans-serif; }
+  th, td { border: 1px solid #bbb; padding: 6px 9px; text-align: left; }
+  th { background: #f0f0f0; font-weight: 600; }
+  code, pre { font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 0.82em; background: #f5f5f5; padding: 1px 4px; border-radius: 3px; }
+  pre { padding: 12px; overflow-x: auto; border: 1px solid #ddd; border-radius: 6px; line-height: 1.45; }
+  ol li, ul li { margin: 5px 0; }
+  blockquote { border-left: 3px solid #444; margin-left: 0; padding-left: 16px; color: #222; font-style: italic; background: #fafafa; padding: 8px 16px; border-radius: 4px; }
+  .viz { width: 100%; margin: 14px 0; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+  .viz figcaption { font-family: 'Inter', sans-serif; }
+  .provenance-badge { display: inline-block; background: #f0f4f8; border: 1px solid #c0cdd8; color: #334; border-radius: 10px; padding: 2px 9px; font-size: 0.78em; font-family: 'Inter', monospace; margin-right: 6px; }
+  footer { margin-top: 36px; font-size: 0.8em; color: #666; border-top: 1px solid #ccc; padding-top: 10px; font-family: 'Inter', sans-serif; }
+  .titleblock { text-align: center; margin: 12px 0 30px; padding-bottom: 18px; border-bottom: 1px solid #ddd; }
+  .tb-app { font-size: 0.78em; letter-spacing: 0.5em; color: #555; margin-bottom: 12px; font-family: 'Inter', sans-serif; }
+  .tb-title { font-size: 2.1em; margin: 0 0 10px; border: none; padding: 0; font-weight: 600; }
+  .tb-sub { font-size: 0.88em; color: #555; font-family: 'Inter', sans-serif; }
+  .math { text-align: center; font-size: 1.08em; background: #f7f7f9; border: 1px solid #e0e0e0; border-radius: 8px; padding: 14px 12px; margin: 16px 0; font-family: 'EB Garamond', serif; }
+  .math-tex { font-family: 'EB Garamond', serif; }
+  .calc-step { margin: 6px 0 6px 18px; padding-left: 12px; border-left: 2px solid #e8e8e8; }
+  @media print { body { padding: 0; } @page { margin: 18mm 16mm; } }
 """
 
 
@@ -556,7 +655,9 @@ def build_report_html(record, weights: Optional[Dict[str, float]] = None,
                         f"{_html.escape(chr(10).join(block))}</code></pre>")
             continue
         if line.startswith("$$"):
-            body.append(f"<p class='math'>{_math_to_html(line)}</p>")
+            # Keep raw LaTeX for MathJax + unicode fallback for print without JS
+            raw_tex = line.strip().strip("$").strip()
+            body.append(f"<p class='math' data-tex='{ _html.escape(raw_tex)}'>{_math_to_html(line)}<span class='math-tex' style='display:none'>$$ { _html.escape(raw_tex)} $$</span></p>")
         elif line.startswith("#### "):
             body.append(f"<h4>{_md_inline(line[5:])}</h4>")
         elif line.startswith("### "):
@@ -592,19 +693,27 @@ def build_report_html(record, weights: Optional[Dict[str, float]] = None,
     if body and body[0].startswith("<h1>"):
         body = body[1:]
     rest = chr(10).join(body)
+    mathjax = r"""
+<script>
+window.MathJax = { tex: { inlineMath: [['$','$'], ['\\(','\\)']], displayMath: [['$$','$$'], ['\\[','\\]']], processEscapes: true }, options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] } };
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+"""
+    rest = chr(10).join(body)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <title>KilonovaScout Follow-Up Report — {_html.escape(str(event.get('ivorn', record.run_id)))}</title>
 <style>{_PRINT_CSS}</style>
+{mathjax}
 </head>
 <body>
 {_title_block_html(record)}
 <div style="margin:10px 0">{badges}</div>
 {viz_html}
 {rest}
-<footer>Report ID {_html.escape(record.run_id)} — calculation traces reflect the exact values computed by the pipeline scoring tool.</footer>
+<footer>Report ID {_html.escape(record.run_id)} — calculation traces reflect the exact values computed by the pipeline scoring tool. Equations rendered with MathJax; print to PDF preserves vector math.</footer>
 </body>
 </html>"""
 

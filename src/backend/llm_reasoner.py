@@ -112,7 +112,7 @@ def _call_litellm(model_id: str, prompt: str, api_key: str, timeout: int = 20) -
                 api_key=api_key,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=512,
+                max_tokens=700,
                 response_format={"type": "json_object"},
                 timeout=timeout,
             )
@@ -166,7 +166,7 @@ def _call_gemini_rest(api_key: str, prompt: str, timeout: int, model_id: str = "
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 512,
+            "maxOutputTokens": 700,
             "responseMimeType": "application/json",
         },
     }
@@ -192,7 +192,7 @@ def _call_groq_rest(api_key: str, prompt: str, timeout: int, model_id: str = "")
         "model": _model_name(model_id) or "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
-        "max_tokens": 512,
+        "max_tokens": 700,
         "response_format": {"type": "json_object"},
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=timeout)

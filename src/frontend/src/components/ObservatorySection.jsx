@@ -142,6 +142,16 @@ export default function ObservatorySection() {
   const handleSave = async () => {
     setLoading(true)
     setSaveError('')
+    // Guard: Palomar name with far coordinates is almost certainly a map-click mis-pick
+    if ((obsName || '').toLowerCase().includes('palomar')) {
+      const dLat = Math.abs(pickedPos.lat - 33.356)
+      const dLon = Math.abs(((pickedPos.lon - (-116.865) + 540) % 360) - 180)
+      if (dLat > 5 || dLon > 5) {
+        setSaveError(`Palomar is at 33.356°N, 116.865°W — you’re saving “Palomar” at ${pickedPos.lat.toFixed(3)}°, ${pickedPos.lon.toFixed(3)}°. If intentional, rename the site first; otherwise drag the marker back to California.`)
+        setLoading(false)
+        return
+      }
+    }
     try {
       const payload = {
         name: obsName || 'Palomar Observatory',
