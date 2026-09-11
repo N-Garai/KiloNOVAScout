@@ -193,30 +193,40 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     if (finishedRef.current === rid) return
     finishedRef.current = rid
     setStreamState('closed')
-    try {
-      const { data } = await axios.get(`/api/runs/${rid}`)
+    const fetchRun = async () => {
+      const { data } = await axios.get(`/api/runs/${rid}`, {
+        headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        params: { t: Date.now() },
+      })
       setAlertData(data.alert)
       setCandidates(data.candidates || [])
       setAgentStatus(data.status)
       setSource(data.alert?.source || 'mock')
       setLlmRationale(data.llm_rationale || (data.llm_structured && data.llm_structured.rationale) || '')
       setLlmStructured(data.llm_structured || null)
-      setProvenance(data.provenance || null) // v3 data-source attribution badge (M4.4)
+      setProvenance(data.provenance || null)
       setLiveFound(!!data.live_trigger_found)
       setLiveNote(data.live_check_note || '')
       setReportMarkdown('')
       setReportHtml('')
-      // Merge the full persisted step history: covers anything emitted
-      // before the SSE subscription connected.
       if (Array.isArray(data.execution_traces) && data.execution_traces.length > 0) {
         data.execution_traces.forEach(mergeStep)
       }
       if (data.status === 'target_acquired') {
         setTimeout(() => onTargetAcquired && onTargetAcquired(), 800)
       }
+    }
+    try {
+      await fetchRun()
     } catch (error) {
-      console.error('Run fetch failed:', error)
-      setRunError('Run finished but its results could not be fetched. Reload and check the latest event.')
+      console.warn('Run fetch failed, retrying in 1s:', error)
+      try {
+        await new Promise(r => setTimeout(r, 1000))
+        await fetchRun()
+      } catch (error2) {
+        console.error('Run fetch failed after retry:', error2)
+        setRunError('Run finished but its results could not be fetched. Reload and check the latest event.')
+      }
     } finally {
       if (finishTimerRef.current) clearTimeout(finishTimerRef.current)
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
