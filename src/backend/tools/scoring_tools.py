@@ -161,7 +161,7 @@ def lunar_penalty(target_ra: float, target_dec: float) -> Dict[str, float]:
     return {
         "moon_separation_deg": round(sep_deg, 4),
         "lunar_penalty": round(penalty, 4),
-        "moon_safe": penalty == 0.0,
+        "moon_safe": bool(penalty == 0.0),
     }
 
 

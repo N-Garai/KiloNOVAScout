@@ -207,6 +207,10 @@ def _galaxy_to_dict(g: Galaxy) -> Dict[str, Any]:
     # so coalesce explicitly — consumers call .toFixed() unconditionally.
     score_breakdown = getattr(g, "score_breakdown", None)
     observability = getattr(g, "observability", None)
+    # Defensive: coerce any numpy.bool_/numpy.float64 to native Python types
+    # so FastAPI's jsonable_encoder doesn't crash.
+    if isinstance(observability, dict):
+        observability = {k: _safe_value(v) for k, v in observability.items()}
     return {
         "name": g.name,
         "ra": g.ra_deg,
@@ -218,9 +222,24 @@ def _galaxy_to_dict(g: Galaxy) -> Dict[str, Any]:
         "luminosity_k": getattr(g, "luminosity_k", None),
         "pgc": getattr(g, "pgc", None),
         "catalog_source": getattr(g, "catalog_source", None) or "unknown",
-        "observability": observability if isinstance(observability, dict) else None,
+        "observability": observability,
         "score_breakdown": score_breakdown.model_dump() if hasattr(score_breakdown, "model_dump") else score_breakdown,
     }
+
+
+def _safe_value(v):
+    """Coerce numpy types to native Python for JSON serialization."""
+    try:
+        import numpy as np
+        if isinstance(v, (np.bool_,)):
+            return bool(v)
+        if isinstance(v, (np.floating,)):
+            return float(v)
+        if isinstance(v, (np.integer,)):
+            return int(v)
+    except ImportError:
+        pass
+    return v
 
 
 def _weather_to_dict(w: ObservatoryWeather) -> Dict[str, Any]:
@@ -682,7 +701,7 @@ class KilonovaScoutAgent(Agent):
             visible_count = 0
             for g in galaxies:
                 obs = getattr(g, "observability", None) or {}
-                if obs.get("moon_safe") is False:
+                if not obs.get("moon_safe", True):
                     moon_blocked += 1
                 if float(obs.get("mean_airmass", 38.0) or 38.0) < 38.0:
                     visible_count += 1

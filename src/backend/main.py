@@ -635,6 +635,27 @@ def _step_to_dict(step) -> dict:
             "status": str(getattr(step, "status", "?"))}
 
 
+def _to_jsonable(obj):
+    """Recursively convert numpy types to native Python for JSON serialization."""
+    try:
+        import numpy as np
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except ImportError:
+        pass
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    return obj
+
+
 @app.post("/api/simulate-event", status_code=202)
 async def api_simulate_event(event_class: str = "bns"):
     """Launch a run and return immediately with its id (streaming flow).
@@ -681,7 +702,7 @@ async def api_run_record(run_id: str):
     else:
         status = _STATUS_MAP.get(event.get("agent_status") or "", "processing")
     weather = record.weather if isinstance(record.weather, dict) else {}
-    return {
+    return _to_jsonable({
         "alert": {
             "alert_id": event.get("trigger_id") or "GW170817",
             "topic": event.get("topic") or "",
@@ -704,7 +725,7 @@ async def api_run_record(run_id: str):
         "visualizations": list((record.visualizations or {}).keys()),
         "live_trigger_found": (record.source == "live"),
         "live_check_note": event.get("live_note") or "",
-    }
+    })
 
 
 @app.post("/api/simulate-gcn-alert")
@@ -729,7 +750,7 @@ async def api_latest_event(response: Response):
     if not record:
         response.status_code = 204
         return
-    return {
+    return _to_jsonable({
         "run_id": record.run_id,
         "source": record.source,
         "status": record.status,
@@ -740,7 +761,7 @@ async def api_latest_event(response: Response):
         "candidates": record.candidates,
         "provenance": dict(record.provenance) if record.provenance else None,
         "execution_traces": kilonova_agent.get_execution_traces(),
-    }
+    })
 
 
 @app.get("/api/runs/{run_id}/events")
