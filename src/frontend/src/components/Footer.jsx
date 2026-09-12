@@ -5,6 +5,7 @@ const NAV = [
   { label: 'Architecture', href: '#architecture' },
   { label: 'Observatory', href: '#observatory' },
   { label: 'Live Demo', href: '#dashboard' },
+  { label: 'Historical Analysis', href: '#historical' },
 ]
 
 const SOURCES = [

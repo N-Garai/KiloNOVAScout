@@ -42,7 +42,7 @@ from ..models import (
     TelescopeSlewScript,
     Voevent,
 )
-from ..event_classes import METADATA, evaluate_trigger, get_profile, harvest_params
+from ..event_classes import METADATA, _fnum, evaluate_trigger, get_profile, harvest_params
 from ..llm_advisors import host_explain, triage_note, weather_risk
 from ..run_registry import RunRegistry, claim_live_trigger, live_run_id, normalize_priorities, note_live_run
 from .subagents import anomaly as anomaly_subagent
@@ -301,6 +301,14 @@ def _classify_trigger(payload: GcnKafkaPayload) -> Dict[str, Any]:
                 "confidence": 0.9, "subclass": "unlocalized",
                 "class_key": gate["class_key"]}
     base = _mock_verdict(payload)
+    # Carry the harvested FAR into the verdict: the LLM rationale prompt
+    # renders FAR from this dict, and without it the model sees "unknown"
+    # next to a "FAR must be <1e-7 Hz" instruction and vetoes an otherwise
+    # gate-ACCEPTED trigger (e.g. GW170817 replay, FAR 1.2e-9).
+    try:
+        _far = _fnum(harvest_params(payload.voevent.what), "far")
+    except Exception:
+        _far = None
     base.update({
         "event_class": gate["class_key"],
         "class_label": METADATA.get(gate["class_key"], METADATA["bns"])["label"],
@@ -308,6 +316,7 @@ def _classify_trigger(payload: GcnKafkaPayload) -> Dict[str, Any]:
         "gate_reason": gate["reason"],
         "gate_confidence": gate["confidence"],
         "gate_subclass": gate["subclass"],
+        "far": _far,
     })
     return base
 

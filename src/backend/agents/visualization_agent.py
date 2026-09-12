@@ -356,6 +356,24 @@ def select_visualizations(skymap, candidates: List[Dict[str, Any]],
         notes.append("distance plot: skipped (insufficient distance data)")
     if grb_hit:
         notes.append("GRB coincidence: scoring breakdown carries the boost term")
+    # New-pool plots in the deterministic fallback (so they appear even when
+    # the LLM selector is unavailable, e.g. rate-limited keys).
+    n_air = [c for c in cands if (c.get("observability") or {}).get("mean_airmass") is not None]
+    if len(n_air) >= 3:
+        selected.append("score_vs_airmass")
+        notes.append(f"score-vs-airmass: {len(n_air)} airmass points show horizon spread")
+    tiling = context.get("tiling") if isinstance(context.get("tiling"), dict) else None
+    if tiling and tiling.get("tiles"):
+        selected.append("tiling_map")
+        notes.append(f"tiling map: {len(tiling['tiles'])} tiles drive the field plan")
+    w = context.get("weather") if isinstance(context.get("weather"), dict) else {}
+    try:
+        _cloud = float(w.get("cloud_cover_percent", 0) or 0)
+    except Exception:
+        _cloud = 0.0
+    if _cloud >= 40 or w.get("dome_safe") is False:
+        selected.append("weather_gauge")
+        notes.append("weather gauge: marginal conditions need a glanceable panel")
     return selected, notes
 
 
@@ -406,6 +424,7 @@ def choose_visualizations_llm(skymap, candidates: List[Dict[str, Any]],
             if key:
                 model = _os.getenv("FALLBACK_LLM", "groq/openai/gpt-oss-120b")
             else:
+                print("[VIZ] selector skipped: no LLM keys configured")
                 return None
         from litellm import completion
         resp = completion(model=model, api_key=key,
@@ -414,17 +433,20 @@ def choose_visualizations_llm(skymap, candidates: List[Dict[str, Any]],
         text = (resp.choices[0].message.content or "").strip()
         start, end = text.find("{"), text.rfind("}")
         if start < 0 or end <= start:
+            print("[VIZ] selector fallback: model returned no JSON object")
             return None
         data = _json.loads(text[start:end + 1])
         plots = [p for p in (data.get("plots") or []) if p in VIZ_POOL]
         plots = list(dict.fromkeys(plots))[:4]
         if len(plots) < 2:
+            print(f"[VIZ] selector fallback: only {len(plots)} valid plots in answer")
             return None
         if not any(p in ("skymap_candidates", "scoring_breakdown") for p in plots):
             plots = (plots + ["scoring_breakdown"])[:4]
         reason = str(data.get("reason", ""))[:160]
         return {"plots": plots, "reason": reason}
-    except Exception:
+    except Exception as exc:
+        print(f"[VIZ] selector fallback: {exc}")
         return None
 
 
@@ -445,7 +467,9 @@ def generate_run_visualizations(skymap, candidates: List[Dict[str, Any]],
         selected, notes = llm_pick["plots"], [f"llm-selected: {llm_pick['reason'] or 'run story'}"]
         print(f"[VIZ] llm-selected plots: {', '.join(selected)} ({'; '.join(notes)})")
     else:
-        selected, notes = select_visualizations(skymap, candidates, context)
+        fb_ctx = dict(context or {})
+        fb_ctx.setdefault("weather", weather)
+        selected, notes = select_visualizations(skymap, candidates, fb_ctx)
         print(f"[VIZ] rule-based fallback plots: {', '.join(selected)} ({'; '.join(notes)})")
     plots: Dict[str, str] = {}
     generators = {
