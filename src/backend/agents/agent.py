@@ -485,6 +485,55 @@ class KilonovaScoutAgent(Agent):
             await _notify_run_complete(run.run_id)
             return AgentOutput(message=f"Mock pipeline error: {exc}", details={"error": str(exc)}, action_status="failure")
 
+    @_exclusive_run
+    async def run_historical_event(self, event_id: str, run: Optional[RunRecord] = None) -> AgentOutput:
+        """Retrospective analysis of one curated historical event (v4 M17).
+
+        The event already happened: its skymap URL / position / alert
+        properties come from data/historical_events.json (official links),
+        so there is no live-check and no live→mock fallback chain — the DAG
+        runs once on trusted data. Official skymap FITS is downloaded at
+        analysis time by the existing DAG stage (bundled replay covers dead
+        links, honestly labeled per stage).
+        """
+        from ..historical import build_payload, get_event
+        entry = get_event(event_id)
+        if entry is None:
+            return AgentOutput(message=f"Unknown historical event '{event_id}'.",
+                               details={"error": "unknown_event"}, action_status="failure")
+        payload = build_payload(entry)
+        if run is None:
+            run = await run_registry.create_run(
+                source="historical", event=_serialize_event(payload.voevent, topic=payload.topic))
+        else:
+            await run_registry.attach(run.run_id, event_update=_serialize_event(
+                payload.voevent, topic=payload.topic))
+            buffer_record = await run_registry.get_record(run.run_id)
+            if buffer_record is not None:
+                buffer_record.source = "historical"
+        self.agent_state.run_id = run.run_id
+        self.agent_state.last_gcn_event = payload.voevent.ivorn
+        self.agent_state.source = "historical"
+        try:
+            output = await self._run_dag(payload, run)
+            await run_registry.finish_run(
+                run.run_id, "completed",
+                llm_rationale=self.agent_state.llm_rationale or output.message,
+                candidates=[_galaxy_to_dict(g) for g in self.agent_state.candidate_galaxies or []],
+                weather=_weather_to_dict(self.agent_state.observatory_weather) if self.agent_state.observatory_weather else None,
+                slew_script=self.agent_state.slew_script.script_content if self.agent_state.slew_script else None,
+            )
+            await _attach_weather_tier(run.run_id)
+            await _record_agent_status(run.run_id, self.agent_state.status)
+            await _notify_run_complete(run.run_id)
+            return output
+        except Exception as exc:
+            self.agent_state.status = "error"
+            await run_registry.finish_run(run.run_id, "failed", error=str(exc))
+            await _record_agent_status(run.run_id, "error")
+            await _notify_run_complete(run.run_id)
+            return AgentOutput(message=f"Historical pipeline error: {exc}", details={"error": str(exc)}, action_status="failure")
+
     async def _run_dag(self, payload: GcnKafkaPayload, run: RunRecord) -> AgentOutput:
         skymap_url = payload.voevent.wherewhen.get("skymap_url") if payload.voevent.wherewhen else None
         if not skymap_url:
@@ -828,12 +877,18 @@ class KilonovaScoutAgent(Agent):
 
         async def do_visualizations():
             try:
+                viz_ctx = {
+                    "grb_boost": grb_boost,
+                    "grb_coincidence": grb_boost > 1.0,
+                    "event_class": getattr(run, "event_class", None) or (run.event or {}).get("event_class", "bns") if hasattr(run, "event") else "bns",
+                    "tiling": (run.event or {}).get("tiling") if hasattr(run, "event") and isinstance(run.event, dict) else None,
+                }
                 return await asyncio.to_thread(
                     generate_run_visualizations,
                     skymap,
                     [_galaxy_to_dict(g) for g in galaxies],
                     _weather_to_dict(weather),
-                    {"grb_boost": grb_boost, "grb_coincidence": grb_boost > 1.0},
+                    viz_ctx,
                 )
             except Exception as exc:
                 print(f"[VIZ] visualization generation failed (continuing): {exc}")

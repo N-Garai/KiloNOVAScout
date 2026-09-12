@@ -91,10 +91,10 @@ export default function ArchitectureSection() {
     },
     {
       name: "LLM Rationale Agent",
-      purpose: "Generates the human-readable summary and decision justification, with plots in parallel.",
-      tools: ["llm.rationale", "generate_run_visualizations"],
+      purpose: "Generates the human-readable summary and decision justification; picks 2–4 plots from a 7-plot pool (LLM selector, rule fallback), with plots in parallel.",
+      tools: ["llm.rationale", "choose_visualizations_llm", "generate_run_visualizations"],
       skills: ["reasoning", "visualization"],
-      llm: "full (512 tok, JSON)",
+      llm: "full (512 tok, JSON) + viz pick (128 tok)",
       accent: "blue",
     },
     {
@@ -139,6 +139,14 @@ export default function ArchitectureSection() {
       skills: ["anomaly", "tiling"],
       llm: "outlier note (gated)",
       accent: "purple",
+    },
+    {
+      name: "↳ VizSelector",
+      purpose: "LLM plot picker: chooses 2–4 figures from a 7-plot pool per run story (horizon-limited? tiling? weather-marginal?) — rule-based fallback when keys absent.",
+      tools: ["choose_visualizations_llm"],
+      skills: ["visualization"],
+      llm: "pick (128 tok, 10s)",
+      accent: "blue",
     },
   ]
 
@@ -237,7 +245,7 @@ export default function ArchitectureSection() {
               AGENT <span className="bg-gradient-to-r from-cosmic-cyan to-cosmic-magenta bg-clip-text text-transparent">DISCOVERY</span>
             </h3>
             <p className="font-mono text-xs text-gray-400 mt-2 tracking-widest uppercase">
-              Scroll to travel the pipeline — 9 agents + 3 hook-gated subagents, left to right
+              Scroll to travel the pipeline — 9 agents + 4 hook-gated subagents, left to right
             </p>
           </div>
 

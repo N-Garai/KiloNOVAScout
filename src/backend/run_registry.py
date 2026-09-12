@@ -30,7 +30,7 @@ from .models import (
 )
 
 
-MAX_RUN_HISTORY = 20
+MAX_RUN_HISTORY = 200
 
 
 # Live-trigger claim registry: superevent IDs that already ran the live

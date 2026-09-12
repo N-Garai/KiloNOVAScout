@@ -734,6 +734,122 @@ async def api_simulate_gcn_alert():
     return await simulate_gcn_alert()
 
 
+# ---- Historical analysis (v4 M17) ---------------------------------------
+# The curated corpus lives in data/historical_events.json (metadata + official
+# links only). Heavy skymap FITS is downloaded at ANALYSIS time from the
+# stored official URL by the existing DAG stage (bundled replay covers dead
+# links); GRB/neutrino entries carry positions for point-map synthesis.
+_historical_batches = {}
+
+
+@app.get("/api/historical/events")
+async def api_historical_events(event_class: str = "", start_year: int = 0, end_year: int = 0):
+    """List curated historical events, filtered by class and year range.
+
+    Pure local-JSON filtering — no external calls, no latency. ``event_class``
+    accepts a comma-separated list (bns,grb,neutrino); empty means all.
+    """
+    try:
+        from .historical import filter_events
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"historical corpus unavailable: {exc}")
+    events = filter_events(
+        event_classes=event_class or None,
+        start_year=start_year or None,
+        end_year=end_year or None,
+    )
+    by_class: dict = {}
+    for e in events:
+        by_class[e.get("event_class", "?")] = by_class.get(e.get("event_class", "?"), 0) + 1
+    return _to_jsonable({"events": events, "total": len(events), "by_class": by_class})
+
+
+async def _run_historical_batch(batch_id: str, event_ids: list) -> None:
+    """Sequential batch runner (one event at a time — 512 MB Render budget)."""
+    batch = _historical_batches.get(batch_id)
+    if not batch:
+        return
+    for eid in event_ids:
+        item = {"event_id": eid, "run_id": None, "status": "running",
+                "top_host": None, "score": None, "airmass": None,
+                "weather_cloud": None, "tiling": None, "report_url": None,
+                "error": ""}
+        try:
+            if kilonova_agent.is_busy():
+                item.update(status="busy",
+                            error="Pipeline busy — another run is in progress; retry this event later.")
+            else:
+                record = await run_registry.create_run(
+                    source="historical", event={"event_class": "bns", "note": f"historical {eid} accepted"})
+                item["run_id"] = record.run_id
+                await kilonova_agent.run_historical_event(eid, run=record)
+                rec = await run_registry.get_record(record.run_id)
+                if rec is None:
+                    item.update(status="failed", error="run record lost")
+                else:
+                    cands = rec.candidates or []
+                    top = cands[0] if cands else {}
+                    obs = (top.get("observability") or {}) if isinstance(top, dict) else {}
+                    wx = rec.weather if isinstance(rec.weather, dict) else {}
+                    ev = rec.event if isinstance(rec.event, dict) else {}
+                    tiling = ev.get("tiling") if isinstance(ev.get("tiling"), dict) else {}
+                    tiles = tiling.get("tiles") if isinstance(tiling, dict) else None
+                    item.update(
+                        status=rec.status,
+                        top_host=(top.get("name") if isinstance(top, dict) else None),
+                        score=(top.get("composite_score") if isinstance(top, dict) else None),
+                        airmass=obs.get("mean_airmass"),
+                        weather_cloud=wx.get("cloud_cover_percent"),
+                        tiling=(f"{len(tiles)} pointings" if isinstance(tiles, list) else None),
+                        report_url=f"/api/runs/{record.run_id}/report",
+                        error=(rec.event.get("gate_reason", "") if isinstance(rec.event, dict) and rec.status == "failed" else ""),
+                    )
+        except Exception as exc:
+            item.update(status="failed", error=str(exc)[:300])
+        batch["results"].append(item)
+        done = len(batch["results"])
+        batch["status"] = "running" if done < batch["total"] else "completed"
+    batch["status"] = "completed"
+
+
+@app.post("/api/historical/analyze", status_code=202)
+async def api_historical_analyze(body: dict):
+    """Start a retrospective batch over curated historical events.
+
+    Body: {"event_ids": ["S190425z", "IC170922A"]}. Runs sequentially in the
+    background; poll GET /api/historical/batch/{batch_id} for progress.
+    Full per-event reports stay at GET /api/runs/{run_id}/report (no new
+    report code — same pipeline, same report, historical provenance label).
+    """
+    event_ids = (body or {}).get("event_ids") or []
+    if not isinstance(event_ids, list) or not event_ids:
+        raise HTTPException(status_code=400, detail="Provide {\"event_ids\": [...]}.")
+    try:
+        from .historical import get_event
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"historical corpus unavailable: {exc}")
+    unknown = [eid for eid in event_ids if get_event(eid) is None]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown historical event(s): {', '.join(unknown)}")
+    if len(event_ids) > 20:
+        raise HTTPException(status_code=400, detail="Batch limited to 20 events per request (512 MB budget).")
+    import time as _time
+    batch_id = f"batch-{int(_time.time() * 1000)}"
+    _historical_batches[batch_id] = {"batch_id": batch_id, "status": "running",
+                                     "total": len(event_ids), "results": []}
+    asyncio.create_task(_run_historical_batch(batch_id, list(event_ids)))
+    return {"batch_id": batch_id, "total": len(event_ids), "status": "started"}
+
+
+@app.get("/api/historical/batch/{batch_id}")
+async def api_historical_batch(batch_id: str):
+    """Batch status + per-event summary table."""
+    batch = _historical_batches.get(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return _to_jsonable(batch)
+
+
 @app.post("/agent/approve-slew-script")
 async def approve_slew_script():
     return await kilonova_agent.approve_slew_script()

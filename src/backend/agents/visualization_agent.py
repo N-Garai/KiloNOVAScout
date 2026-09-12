@@ -232,6 +232,92 @@ def plot_distance_distribution(skymap, candidates: List[Dict[str, Any]]) -> str:
     return _fig_to_base64(fig)
 
 
+def plot_score_vs_airmass(candidates: List[Dict[str, Any]]) -> str:
+    """Scatter: windowed airmass vs composite score — answers 'horizon-limited?' at a glance."""
+    _apply_dark_style()
+    plt = _pyplot()
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    xs, ys, labels = [], [], []
+    for c in candidates:
+        obs = c.get("observability") or {}
+        bd = c.get("score_breakdown") or {}
+        try:
+            xs.append(float(obs.get("mean_airmass", (bd.get("terms") or {}).get("airmass", 38)) or 38))
+            ys.append(float(c.get("composite_score", 0) or 0))
+            labels.append(str(c.get("name", "?"))[:12])
+        except Exception:
+            continue
+    ax.scatter(xs, ys, color="#3ad6c5", s=70, edgecolors="#0d1117", zorder=3)
+    for x, y, lab in zip(xs, ys, labels):
+        ax.annotate(lab, (x, y), fontsize=7, color="#ffd0d0", xytext=(5, 5), textcoords="offset points")
+    ax.axvline(2.0, color="#ffd23a", linewidth=1.0, linestyle="--", label="X=2 (low-altitude line)")
+    ax.set_xlabel("Windowed mean airmass (Xbar; 38 = below horizon)")
+    ax.set_ylabel("Composite score")
+    ax.set_title("Score vs Airmass", fontsize=11)
+    ax.legend(fontsize=7)
+    return _fig_to_base64(fig)
+
+
+def plot_tiling_map(skymap, candidates: List[Dict[str, Any]],
+                    context: Optional[Dict[str, Any]] = None) -> str:
+    """RA/Dec map of tiling tiles + candidates — the field strategy at a glance."""
+    _apply_dark_style()
+    plt = _pyplot()
+    context = context or {}
+    tiling = context.get("tiling") or {}
+    tiles = tiling.get("tiles") or []
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    if tiles:
+        tx = [float(t.get("ra", t.get("center_ra", 0)) or 0) for t in tiles]
+        ty = [float(t.get("dec", t.get("center_dec", 0)) or 0) for t in tiles]
+        ax.scatter(tx, ty, marker="s", s=120, facecolors="none", edgecolors="#ffd23a",
+                   linewidths=1.2, label=f"{len(tiles)} tiles")
+    for c in candidates[:8]:
+        ax.scatter([float(c.get("ra", 0) or 0)], [float(c.get("dec", 0) or 0)],
+                   marker="*", s=140, color="#ff5a5a", zorder=5)
+        ax.annotate(str(c.get("name", ""))[:10], (float(c.get("ra", 0) or 0), float(c.get("dec", 0) or 0)),
+                    fontsize=6.5, color="#ffd0d0", xytext=(4, 4), textcoords="offset points")
+    ax.set_xlabel("RA (deg)")
+    ax.set_ylabel("Dec (deg)")
+    ax.set_title("Tiling Map with Candidates", fontsize=11)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
+    return _fig_to_base64(fig)
+
+
+def plot_weather_gauge(weather: Optional[Dict[str, Any]]) -> str:
+    """Single-glance weather bar: cloud, humidity, dome — cheap, no candidates needed."""
+    _apply_dark_style()
+    plt = _pyplot()
+    w = weather or {}
+    cloud = float(w.get("cloud_cover_percent", 0) or 0)
+    hum = float(w.get("humidity_pct", w.get("humidity", 0)) or 0)
+    dome = 100.0 if w.get("dome_safe") else 0.0
+    fig, ax = plt.subplots(figsize=(6, 3.2))
+    labels = ["Cloud %", "Humidity %", "Dome open %"]
+    vals = [cloud, hum, dome]
+    colors = ["#3a8ad6", "#3ad6c5", "#ffd23a" if dome else "#d63a5a"]
+    ax.barh(labels, vals, color=colors, height=0.55)
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("Percent")
+    ax.set_title(f"Weather — {w.get('observatory_name', 'site')}", fontsize=11)
+    for lab, v in zip(labels, vals):
+        ax.text(min(98, v + 1), lab, f"{v:.0f}%", va="center", fontsize=8, color="#e8e8f0")
+    return _fig_to_base64(fig)
+
+
+# Pool registry: every plot the LLM selector may choose from.
+VIZ_POOL = {
+    "skymap_candidates": {"title": "90% Localization Region", "needs": "skymap"},
+    "scoring_breakdown": {"title": "Scoring Breakdown", "needs": "candidates"},
+    "observing_conditions": {"title": "Observing Conditions", "needs": "observability"},
+    "distance_distribution": {"title": "Distance Distribution", "needs": "distances"},
+    "score_vs_airmass": {"title": "Score vs Airmass", "needs": "candidates"},
+    "tiling_map": {"title": "Tiling Map", "needs": "tiling"},
+    "weather_gauge": {"title": "Weather Gauge", "needs": "weather"},
+}
+
+
 def select_visualizations(skymap, candidates: List[Dict[str, Any]],
                             context: Optional[Dict[str, Any]] = None):
     """Decide which plots this run actually needs, from live run state.
@@ -273,6 +359,75 @@ def select_visualizations(skymap, candidates: List[Dict[str, Any]],
     return selected, notes
 
 
+def choose_visualizations_llm(skymap, candidates: List[Dict[str, Any]],
+                                weather: Optional[Dict[str, Any]] = None,
+                                context: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """LLM plot selector (@tool pattern, advisory-only, 10s timeout, 128 tok max).
+
+    Picks 2–4 plots from VIZ_POOL for this run's story (horizon-limited?
+    degree-scale? weather-marginal?). Returns {plots, reason} or None when
+    keys are absent / the model fails / the answer is invalid — the caller
+    then uses the deterministic rule-based fallback. Never raises.
+    """
+    try:
+        import json as _json
+        import os as _os
+        cands = candidates or []
+        ctx = context or {}
+        summary = {
+            "event_class": ctx.get("event_class", "?"),
+            "n_candidates": len(cands),
+            "area_sq_deg": round(float(getattr(skymap, "area_sq_deg", 0) or 0), 1),
+            "has_observability": any((c.get("observability") or {}).get("mean_airmass") for c in cands),
+            "n_distances": len([c for c in cands if c.get("distance_mpc")]),
+            "has_tiling": bool((ctx.get("tiling") or {}).get("tiles")),
+            "cloud": (weather or {}).get("cloud_cover_percent", "?"),
+            "dome_safe": (weather or {}).get("dome_safe", "?"),
+            "grb_boost": ctx.get("grb_boost", 0),
+        }
+        pool = sorted(VIZ_POOL.keys())
+        prompt = (
+            "You are KilonovaScout's visualization picker. Choose 2-4 plots from "
+            f"{pool} for this follow-up run: {str(summary)[:600]} "
+            "Prefer: skymap_candidates always; scoring_breakdown when ranking matters; "
+            "score_vs_airmass when airmass spreads scores; tiling_map when tiling exists; "
+            "weather_gauge when cloud/dome is marginal; observing_conditions when observability present; "
+            "distance_distribution when >=2 distances. Reply ONLY JSON like "
+            '{"plots": ["skymap_candidates", "scoring_breakdown"], "reason": "one line"}.'
+        )
+        try:
+            from ..llm_reasoner import _primary_model_id as _pm
+            model = _pm()
+        except Exception:
+            model = _os.getenv("PRIMARY_LLM", "gemini/gemini-2.5-flash")
+        key = (_os.getenv("GEMINI_API_KEY", "") or "").strip()
+        if not key:
+            key = (_os.getenv("GROQ_API_KEY", "") or "").strip()
+            if key:
+                model = _os.getenv("FALLBACK_LLM", "groq/openai/gpt-oss-120b")
+            else:
+                return None
+        from litellm import completion
+        resp = completion(model=model, api_key=key,
+                          messages=[{"role": "user", "content": prompt}],
+                          temperature=0.2, max_tokens=128, timeout=10)
+        text = (resp.choices[0].message.content or "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        data = _json.loads(text[start:end + 1])
+        plots = [p for p in (data.get("plots") or []) if p in VIZ_POOL]
+        plots = list(dict.fromkeys(plots))[:4]
+        if len(plots) < 2:
+            return None
+        if not any(p in ("skymap_candidates", "scoring_breakdown") for p in plots):
+            plots = (plots + ["scoring_breakdown"])[:4]
+        reason = str(data.get("reason", ""))[:160]
+        return {"plots": plots, "reason": reason}
+    except Exception:
+        return None
+
+
 def generate_run_visualizations(skymap, candidates: List[Dict[str, Any]],
                                 weather: Optional[Dict[str, Any]] = None,
                                 context: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
@@ -282,14 +437,25 @@ def generate_run_visualizations(skymap, candidates: List[Dict[str, Any]],
     selected plot has a per-plot fallback figure carrying the failure
     reason, so the report always embeds a stable figure set.
     """
-    selected, notes = select_visualizations(skymap, candidates, context)
-    print(f"[VIZ] selected plots: {', '.join(selected)} ({'; '.join(notes)})")
+    # LLM picks 2-4 plots from the 7-plot pool; rule-based fallback on any
+    # failure (no keys, timeout, invalid answer). Visualization never breaks
+    # the run either way.
+    llm_pick = choose_visualizations_llm(skymap, candidates, weather, context)
+    if llm_pick:
+        selected, notes = llm_pick["plots"], [f"llm-selected: {llm_pick['reason'] or 'run story'}"]
+        print(f"[VIZ] llm-selected plots: {', '.join(selected)} ({'; '.join(notes)})")
+    else:
+        selected, notes = select_visualizations(skymap, candidates, context)
+        print(f"[VIZ] rule-based fallback plots: {', '.join(selected)} ({'; '.join(notes)})")
     plots: Dict[str, str] = {}
     generators = {
         "skymap_candidates": ("90% Localization Region", lambda: plot_skymap_with_candidates(skymap, candidates)),
         "scoring_breakdown": ("Scoring Breakdown", lambda: plot_scoring_breakdown(candidates)),
         "observing_conditions": ("Observing Conditions", lambda: plot_observing_conditions(candidates)),
         "distance_distribution": ("Distance Distribution", lambda: plot_distance_distribution(skymap, candidates)),
+        "score_vs_airmass": ("Score vs Airmass", lambda: plot_score_vs_airmass(candidates)),
+        "tiling_map": ("Tiling Map", lambda: plot_tiling_map(skymap, candidates, context)),
+        "weather_gauge": ("Weather Gauge", lambda: plot_weather_gauge(weather if isinstance(weather, dict) else {})),
     }
     for name in selected:
         title, fn = generators[name]

@@ -6,6 +6,7 @@ import MissionSection from './components/MissionSection'
 import ArchitectureSection from './components/ArchitectureSection'
 import ObservatorySection from './components/ObservatorySection'
 import DashboardSection from './components/DashboardSection'
+import HistoricalSection from './components/HistoricalSection'
 import Footer from './components/Footer'
 import StarfieldBackground from './components/StarfieldBackground'
 import Loader from './components/Loader'
@@ -50,6 +51,7 @@ function App() {
           setAgentStatus={setAgentStatus}
           onTargetAcquired={() => setShowApprovalModal(true)}
         />
+        <HistoricalSection />
         <Footer />
       </main>
 
