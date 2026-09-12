@@ -104,7 +104,7 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
     }
   }, [traces.length])
 
-  const keyOf = (t) => `${t.step}-${t.tool_name}-${t.attempt}-${t.status}`
+  const keyOf = (t) => `${t.run_id || ''}-${t.step}-${t.tool_name}-${t.attempt}-${t.status}`
 
   return (
     <motion.div
@@ -218,6 +218,18 @@ export default function AgentTerminal({ traces = [], provenance = null, runId = 
         )}
 
         {traces.map((trace) => {
+          // Batch divider: printed before the next event's workflow starts so
+          // one event's trace is never mistaken for another's.
+          if (trace.batch_divider) {
+            return (
+              <div key={`batch-${trace.batch_divider}-${trace.run_id || ''}`} className="pt-3 pb-1 mt-2 border-t border-cosmic-magenta/30">
+                <span className="font-mono text-[11px] tracking-widest text-cosmic-magenta">
+                  ◆ EVENT {trace.batch_divider}
+                </span>
+                <span className="font-mono text-[10px] text-gray-600 ml-2">retrospective run — same pipeline, same scoring</span>
+              </div>
+            )
+          }
           const isSystem = trace.tool_name === 'run'
           const isChild = !isSystem && !(trace.tool_name || '').includes('.')
           const st = STATUS[trace.status] || STATUS.running

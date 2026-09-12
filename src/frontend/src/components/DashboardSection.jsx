@@ -210,6 +210,15 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
       setLiveNote(data.live_check_note || '')
       setReportMarkdown('')
       setReportHtml('')
+      // Historical runs stack their alert cards (all events together) instead
+      // of overwriting one single-event panel.
+      if (data.alert?.source === 'historical') {
+        setHistAlerts((prev) => (
+          prev.some((a) => a.run_id === rid)
+            ? prev
+            : [...prev, { run_id: rid, alert: data.alert, provenance: data.provenance || null }]
+        ))
+      }
       if (Array.isArray(data.execution_traces) && data.execution_traces.length > 0) {
         data.execution_traces.forEach(mergeStep)
       }
@@ -253,6 +262,11 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     setCandidates([])
     setAlertData(null)
     setReportMarkdown('')
+    // A fresh live launch leaves historical batch mode (its stacked cards
+    // and cumulative trace belong to the batch view).
+    setHistMode(false)
+    setHistAlerts([])
+    if (historical && historical.clear) historical.clear()
 
     // Wake-then-launch: cold backend needs waking, warm backend should not
     // flash a spurious "WAKING" banner. Probe once quietly first.
@@ -401,8 +415,12 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
   const mergeStep = (step) => {
     setExecutionTraces(prev => {
       const existing = [...prev]
-      const idx = existing.findIndex(e => e.step === step.step && e.tool_name === step.tool_name)
+      // Cards are scoped per run: without run_id, a second batch run's step 1
+      // would overwrite the first run's step-1 card instead of appending.
+      const rid = step.run_id || ''
+      const idx = existing.findIndex(e => !e.batch_divider && (e.run_id || '') === rid && e.step === step.step && e.tool_name === step.tool_name)
       const card = {
+        run_id: rid,
         step: step.step,
         tool_name: step.tool_name,
         status: step.status,
@@ -574,21 +592,100 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     }
   }
 
-  // Attach a historical batch run to the SHARED observatory: fresh trace
-  // view, shared SSE stream, shared finish + report machinery.
-  const attachHistoricalRun = (rid) => {
+  // Historical batch mode: traces ACCUMULATE (one event after another, each
+  // headed by an event divider) instead of replacing each other, and every
+  // event's alert card stacks in ALERT DATA below. The candidates panel is
+  // hidden in this mode — per-event tops live in the batch table.
+  const [histMode, setHistMode] = useState(false)
+  const [histAlerts, setHistAlerts] = useState([])
+
+  // Attach a historical batch run to the SHARED observatory: same SSE
+  // stream, same finish + report machinery, cumulative trace view.
+  const attachHistoricalRun = (rid, eventId) => {
     if (!rid || finishedRef.current === rid) return
-    setExecutionTraces([])
-    setCandidates([])
-    setAlertData(null)
+    setHistMode(true)
     setReportMarkdown('')
     setReportHtml('')
     setRunError('')
+    setExecutionTraces((prev) => [
+      ...prev,
+      { batch_divider: eventId || rid, run_id: rid, started_at: new Date().toISOString() },
+    ])
     setRunId(rid)
     startEventStream(rid, () => finishRun(rid))
   }
 
   const historical = useHistoricalBatch({ onHistoricalRun: attachHistoricalRun })
+
+  // Standard preview-window report for ONE run id (used by the dashboard's
+  // own View Report button and by every historical batch row — each row
+  // fetches its own run_id, so different events never share content).
+  const fetchAndShowReport = async (rid) => {
+    if (!rid) return
+    setReportLoading(true)
+    try {
+      const { data } = await axios.get(`/api/runs/${rid}/report`, {
+        headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        params: { t: Date.now() },
+      })
+      const md = data.markdown || data.content || ''
+      const html = data.html || ''
+      if (!md && !html) throw new Error('empty report')
+      setReportMarkdown(md)
+      setReportHtml(html)
+      setShowReport(true)
+    } catch (e) {
+      console.error('report fetch failed', e)
+      try {
+        await new Promise(r => setTimeout(r, 800))
+        const { data } = await axios.get(`/api/runs/${rid}/report`, {
+          headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+          params: { t: Date.now() },
+        })
+        const md = data.markdown || data.content || ''
+        const html = data.html || ''
+        if (md || html) {
+          setReportMarkdown(md)
+          setReportHtml(html)
+          setShowReport(true)
+          return
+        }
+      } catch {}
+      setRunError('Report not ready yet — wait a moment and try again.')
+    } finally {
+      setReportLoading(false)
+    }
+  }
+
+  // Per-row PDF for one batch run (same print flow as Download PDF).
+  const printRowReport = async (rid) => {
+    if (!rid) return
+    const { data } = await axios.get(`/api/runs/${rid}/report`, {
+      headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+      params: { t: Date.now() },
+    })
+    const htmlDoc = data.html || ''
+    const mdDoc = data.markdown || data.content || ''
+    if (!htmlDoc && !mdDoc) throw new Error('empty report')
+    const win = window.open('', '_blank')
+    if (!win) return
+    if (htmlDoc) {
+      win.document.write(htmlDoc)
+      win.document.close()
+      win.focus()
+      win.print()
+    } else {
+      const pre = win.document.createElement('pre')
+      pre.style.fontFamily = 'ui-monospace, Menlo, monospace'
+      pre.style.fontSize = '13px'
+      pre.style.padding = '24px'
+      pre.style.whiteSpace = 'pre-wrap'
+      pre.textContent = mdDoc
+      win.document.body.appendChild(pre)
+      win.document.close()
+      win.print()
+    }
+  }
 
   // Rich HTML report (embedded visualizations, calculation traces, print CSS) —
   // PRD M6.6. Falls back to the inline markdown renderer only if no HTML body
@@ -820,7 +917,10 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           </div>
         </motion.div>
 
-        {(llmRationale || llmStructured) && (
+        {/* Hidden in historical batch mode: one shared panel would show only
+            the latest event's rationale — per-event rationales expand in the
+            batch table below instead. */}
+        {!histMode && (llmRationale || llmStructured) && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -901,10 +1001,67 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
 
         {/* Historical batch results — after the shared observatory trace,
             same report flow per row (View report opens the full report). */}
-        <HistoricalBatchResults h={historical} />
+        <HistoricalBatchResults h={historical} onViewReport={fetchAndShowReport} onDownloadReport={printRowReport} />
 
-        {/* Alert data */}
-        {alertData && (
+        {/* Alert data — historical mode stacks ALL batch events together */}
+        {histMode && histAlerts.length > 0 ? (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="glass rounded-xl p-6 mb-8 border border-cosmic-magenta/30"
+          >
+            <div className="font-cosmic text-sm text-cosmic-magenta mb-4">ALERT DATA — HISTORICAL BATCH ({histAlerts.length})</div>
+            <div className="space-y-5">
+              {histAlerts.map((a) => (
+                <div key={a.run_id} className="border-t border-white/10 pt-4 first:border-t-0 first:pt-0">
+                  <div className="grid md:grid-cols-2 gap-4 font-mono text-xs">
+                    <div>
+                      <span className="text-gray-400">Event ID:</span>{' '}
+                      <span className="text-white">{a.alert?.alert_id}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-400">Type:</span>{' '}
+                      <span className="text-white">{a.alert?.event_type}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-400">IVORN:</span>{' '}
+                      <span className="text-white">{a.alert?.ivorn}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-400">Observatory:</span>{' '}
+                      <span className="text-white">{a.alert?.observatory}</span>
+                    </div>
+                    {a.alert?.gate_reason && (
+                      <div className="md:col-span-2 mt-1">
+                        <span className="text-gray-400">Triage [{a.alert?.gate_status || 'UNKNOWN'}]:</span>{' '}
+                        <span className="text-white">{a.alert?.gate_reason}</span>
+                      </div>
+                    )}
+                  </div>
+                  {a.provenance && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <span className="text-gray-500 font-mono text-[10px] uppercase tracking-wider self-center">Data provenance:</span>
+                      {Object.entries(a.provenance).map(([key, value]) => (
+                        <span
+                          key={key}
+                          className={`font-mono text-[10px] px-2 py-0.5 rounded-full border ${
+                            value === 'live'
+                              ? 'text-green-400 border-green-500/40 bg-green-500/10'
+                              : value === 'replay' || value === 'cached'
+                              ? 'text-amber-400 border-amber-500/40 bg-amber-500/10'
+                              : 'text-gray-400 border-white/15 bg-white/5'
+                          }`}
+                        >
+                          {key}: {value}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        ) : (alertData && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -955,10 +1112,11 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
               </div>
             )}
           </motion.div>
-        )}
+        ))}
 
-        {/* Candidates + report buttons */}
-        {candidates.length > 0 && (
+        {/* Candidates + report buttons — hidden in historical batch mode
+            (per-event tops live in the batch table, not one shared panel) */}
+        {!histMode && candidates.length > 0 && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             whileInView={{ opacity: 1, y: 0 }}

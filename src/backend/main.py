@@ -773,6 +773,7 @@ async def _run_historical_batch(batch_id: str, event_ids: list) -> None:
         item = {"event_id": eid, "run_id": None, "status": "running",
                 "top_host": None, "score": None, "airmass": None,
                 "weather_cloud": None, "tiling": None, "report_url": None,
+                "rationale": "", "confidence": None, "decision": None,
                 "error": ""}
         try:
             if kilonova_agent.is_busy():
@@ -794,6 +795,7 @@ async def _run_historical_batch(batch_id: str, event_ids: list) -> None:
                     ev = rec.event if isinstance(rec.event, dict) else {}
                     tiling = ev.get("tiling") if isinstance(ev.get("tiling"), dict) else {}
                     tiles = tiling.get("tiles") if isinstance(tiling, dict) else None
+                    llm_s = ev.get("llm_structured") if isinstance(ev.get("llm_structured"), dict) else {}
                     item.update(
                         status=rec.status,
                         top_host=(top.get("name") if isinstance(top, dict) else None),
@@ -802,6 +804,9 @@ async def _run_historical_batch(batch_id: str, event_ids: list) -> None:
                         weather_cloud=wx.get("cloud_cover_percent"),
                         tiling=(f"{len(tiles)} pointings" if isinstance(tiles, list) else None),
                         report_url=f"/api/runs/{record.run_id}/report",
+                        rationale=(rec.llm_rationale or ""),
+                        confidence=llm_s.get("confidence"),
+                        decision=llm_s.get("decision"),
                         error=(rec.event.get("gate_reason", "") if isinstance(rec.event, dict) and rec.status == "failed" else ""),
                     )
         except Exception as exc:

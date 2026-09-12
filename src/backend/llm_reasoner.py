@@ -78,10 +78,11 @@ Do NOT return anything except the JSON object. Keep rationale under 40 words.
 
 --- Trigger Verdict ---
 IVORN: {verdict.get('superevent_id', 'unknown')}
-FAR: {verdict.get('far', 'unknown')}
+Event class: {verdict.get('event_class', 'bns')}
+FAR: {verdict.get('far', 'n/a — this class does not report FAR (uses signalness/flux instead)')}
 p_astro: {verdict.get('p_astro', 'unknown')}
 BNS: {verdict.get('BNS', verdict.get('bns', 'unknown'))} NSBH: {verdict.get('NSBH', verdict.get('nsbh', 'unknown'))} HasNS: {verdict.get('gate_confidence', verdict.get('HasNS', 'unknown'))}
-gate: {verdict.get('gate_reason', verdict.get('gate_subclass', ''))}
+gate: {verdict.get('status', '')} — {verdict.get('gate_reason', verdict.get('gate_subclass', ''))}
 
 --- Skymap ---
 {json.dumps(skymap_summary, indent=2) if skymap_summary else 'synthetic fallback'}
@@ -93,7 +94,13 @@ gate: {verdict.get('gate_reason', verdict.get('gate_subclass', ''))}
 {weather_text}
 
 --- Instructions ---
-Evaluate whether the trigger warrants follow-up. FAR must be <1e-7 Hz, HasNS>0.2, dome_safe=True.
+Evaluate whether the trigger warrants follow-up. Rules depend on the event class above:
+- bns: FAR must be <1e-7 Hz WHEN REPORTED (a missing FAR is not disqualifying — the gate already checked it), HasNS>0.2, dome_safe=True.
+- grb: accept on brightness/duration (short bursts and bright long bursts warrant follow-up); FAR does not apply.
+- neutrino: accept on signalness tiers (gold >= 0.5, bronze >= 0.3); FAR does not apply.
+The deterministic gate above has already ACCEPTED this trigger. Only REJECT on concrete
+disqualifying evidence (terrestrial >= 0.5, signalness < 0.3, dome unsafe with cloud > 80%,
+retraction). A missing optional field is NEVER grounds for rejection.
 Return ONLY JSON with the six keys above.
 """
 

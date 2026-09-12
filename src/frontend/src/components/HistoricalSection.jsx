@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { Fragment, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import axios from 'axios'
 
@@ -78,11 +78,13 @@ export function useHistoricalBatch({ onHistoricalRun } = {}) {
       setBatchStatus(data.status || '')
       setResults(data.results || [])
       // Attach every new run to the SHARED AgentTerminal trace, exactly as
-      // if it had been launched — same SSE stream, same finish flow.
+      // if it had been launched — same SSE stream, same finish flow. The
+      // event id travels along so the terminal prints an event divider
+      // before the next workflow's steps.
       ;(data.results || []).forEach((r) => {
         if (r.run_id && !attachedRef.current[r.run_id] && onRunRef.current) {
           attachedRef.current[r.run_id] = true
-          onRunRef.current(r.run_id)
+          onRunRef.current(r.run_id, r.event_id)
         }
       })
       if (data.status !== 'completed') {
@@ -116,10 +118,19 @@ export function useHistoricalBatch({ onHistoricalRun } = {}) {
     }
   }
 
+  const clear = () => {
+    setResults([])
+    setBatchId(null)
+    setBatchStatus('')
+    setAnalyzing(false)
+    setError('')
+    attachedRef.current = {}
+  }
+
   return {
     classes, toggleClass, startYear, setStartYear, endYear, setEndYear,
     events, total, selected, toggleEvent, searching, search,
-    batchId, batchStatus, results, analyzing, analyze, error,
+    batchId, batchStatus, results, analyzing, analyze, error, clear,
   }
 }
 
@@ -192,42 +203,34 @@ export function HistoricalSelector({ h, disabled }) {
   )
 }
 
-export function HistoricalBatchResults({ h }) {
-  const [loadingId, setLoadingId] = useState(null)
-  const [tabError, setTabError] = useState('')
-  // Each row opens its OWN report tab (that event's run_id) — never the
-  // shared dashboard modal — so different events can be compared side by side.
-  const openRowReport = async (runId) => {
-    if (!runId || loadingId) return
-    setLoadingId(runId)
-    setTabError('')
+export function HistoricalBatchResults({ h, onViewReport, onDownloadReport }) {
+  const [busyId, setBusyId] = useState(null)
+  const [rowError, setRowError] = useState('')
+  const [expandedId, setExpandedId] = useState(null)
+  // Each row opens that event's OWN report in the STANDARD preview modal
+  // (same window as normal mode) — never shared content across rows.
+  const viewRow = async (runId) => {
+    if (!runId || busyId || !onViewReport) return
+    setBusyId(runId)
+    setRowError('')
     try {
-      const { data } = await axios.get(`/api/runs/${runId}/report`, {
-        headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
-        params: { t: Date.now() },
-      })
-      const html = data.html || ''
-      const md = data.markdown || data.content || ''
-      if (!html && !md) throw new Error('empty report')
-      const win = window.open('', '_blank')
-      if (!win) return
-      if (html) {
-        win.document.write(html)
-        win.document.close()
-      } else {
-        const pre = win.document.createElement('pre')
-        pre.style.fontFamily = 'ui-monospace, Menlo, monospace'
-        pre.style.fontSize = '13px'
-        pre.style.padding = '24px'
-        pre.style.whiteSpace = 'pre-wrap'
-        pre.textContent = md
-        win.document.body.appendChild(pre)
-        win.document.close()
-      }
+      await onViewReport(runId)
     } catch {
-      setTabError('Report not ready yet — wait a moment and try again.')
+      setRowError('Report not ready yet — wait a moment and try again.')
     } finally {
-      setLoadingId(null)
+      setBusyId(null)
+    }
+  }
+  const downloadRow = async (runId) => {
+    if (!runId || busyId || !onDownloadReport) return
+    setBusyId(runId)
+    setRowError('')
+    try {
+      await onDownloadReport(runId)
+    } catch {
+      setRowError('PDF fetch failed — try again.')
+    } finally {
+      setBusyId(null)
     }
   }
   if (!h.results.length) return null
@@ -291,33 +294,73 @@ export function HistoricalBatchResults({ h }) {
           </thead>
           <tbody>
             {h.results.map((r) => (
-              <tr key={r.event_id} className="border-b border-white/5 text-gray-300">
-                <td className="py-2 pr-3 text-white">{r.event_id}</td>
-                <td className="py-2 pr-3">{r.status}</td>
-                <td className="py-2 pr-3">{r.top_host || '—'}</td>
-                <td className="py-2 pr-3 text-right">{r.score === null || r.score === undefined ? '—' : Number(r.score).toFixed(3)}</td>
-                <td className="py-2 pr-3 text-right">{r.airmass === null || r.airmass === undefined ? '—' : Number(r.airmass).toFixed(2)}</td>
-                <td className="py-2 pr-3 text-right">{r.weather_cloud ?? '—'}</td>
-                <td className="py-2 pr-3">{r.tiling || '—'}</td>
-                <td className="py-2">
-                  {r.run_id ? (
-                    <button onClick={() => openRowReport(r.run_id)} disabled={loadingId === r.run_id} className="px-2 py-1 rounded border border-cosmic-cyan/40 text-cosmic-cyan hover:bg-cosmic-cyan/10 disabled:opacity-50">
-                      {loadingId === r.run_id ? '…' : 'View report'}
+              <Fragment key={r.event_id}>
+                <tr className="border-b border-white/5 text-gray-300">
+                  <td className="py-2 pr-3 text-white">
+                    <button
+                      onClick={() => setExpandedId(expandedId === r.event_id ? null : r.event_id)}
+                      className="hover:text-cosmic-cyan transition-colors"
+                      title="Show this event's LLM rationale"
+                    >
+                      <span className="text-gray-600 mr-1">{expandedId === r.event_id ? '▲' : '▼'}</span>
+                      {r.event_id}
                     </button>
-                  ) : (
-                    <span className="text-gray-500">{r.error ? 'failed' : '…'}</span>
-                  )}
-                </td>
-              </tr>
+                  </td>
+                  <td className="py-2 pr-3">{r.status}</td>
+                  <td className="py-2 pr-3">{r.top_host || '—'}</td>
+                  <td className="py-2 pr-3 text-right">{r.score === null || r.score === undefined ? '—' : Number(r.score).toFixed(3)}</td>
+                  <td className="py-2 pr-3 text-right">{r.airmass === null || r.airmass === undefined ? '—' : Number(r.airmass).toFixed(2)}</td>
+                  <td className="py-2 pr-3 text-right">{r.weather_cloud ?? '—'}</td>
+                  <td className="py-2 pr-3">{r.tiling || '—'}</td>
+                  <td className="py-2">
+                    {r.run_id ? (
+                      <span className="inline-flex gap-1.5">
+                        <button onClick={() => viewRow(r.run_id)} disabled={busyId === r.run_id} className="px-2 py-1 rounded border border-cosmic-cyan/40 text-cosmic-cyan hover:bg-cosmic-cyan/10 disabled:opacity-50">
+                          {busyId === r.run_id ? '…' : 'View report'}
+                        </button>
+                        <button onClick={() => downloadRow(r.run_id)} disabled={busyId === r.run_id} className="px-2 py-1 rounded border border-white/10 text-gray-300 hover:bg-white/5 disabled:opacity-50">
+                          PDF
+                        </button>
+                      </span>
+                    ) : (
+                      <span className="text-gray-500">{r.error ? 'failed' : '…'}</span>
+                    )}
+                  </td>
+                </tr>
+                {expandedId === r.event_id && (
+                  <tr key={`${r.event_id}-rationale`} className="border-b border-white/5">
+                    <td colSpan={8} className="py-2 pr-3">
+                      <div className="rounded-lg bg-black/40 border border-cosmic-magenta/20 p-3">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className="font-mono text-[10px] uppercase tracking-widest text-cosmic-magenta">LLM rationale — {r.event_id}</span>
+                          {typeof r.confidence === 'number' && (
+                            <span className="font-mono text-[10px] px-1.5 py-px rounded-full border border-white/15 text-gray-300">
+                              confidence {Math.round(r.confidence * 100)}%
+                            </span>
+                          )}
+                          {r.decision && (
+                            <span className={`font-mono text-[10px] px-1.5 py-px rounded-full border ${r.decision === 'ACCEPT' ? 'text-green-400 border-green-500/40' : 'text-red-400 border-red-500/40'}`}>
+                              {r.decision}
+                            </span>
+                          )}
+                        </div>
+                        <div className="font-mono text-[11px] text-gray-300 whitespace-pre-wrap">
+                          {r.rationale || 'No rationale recorded for this run yet.'}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>
       </div>
-      {tabError && (
-        <div className="mt-3 font-mono text-[11px] text-red-400">{tabError}</div>
+      {rowError && (
+        <div className="mt-3 font-mono text-[11px] text-red-400">{rowError}</div>
       )}
       <div className="mt-3 font-mono text-[10px] text-gray-500">
-        Same pipeline, same report as the LAUNCH button — only the provenance label differs (historical:event_id). Each View report opens that event's own report in a new tab. Each run streams live into the Agent Observatory above.
+        Same pipeline, same report as the LAUNCH button — only the provenance label differs (historical:event_id). Each View report opens that event's own report in the standard preview window. Each run streams live into the Agent Observatory above.
       </div>
     </motion.div>
   )
