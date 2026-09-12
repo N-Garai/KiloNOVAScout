@@ -42,6 +42,34 @@
     "official_ref": "https://gracedb.ligo.org/superevents/S190901ap/view/"
   },
   {
+    "event_id": "GRB130427A",
+    "event_class": "grb",
+    "trigger_time": "2013-04-27T07:47:06Z",
+    "ra_deg": 173.14,
+    "dec_deg": 27.7,
+    "error_radius_deg": 2.0,
+    "distance_mpc": 1800.0,
+    "skymap_url": null,
+    "alert_properties": {"T90": 138.0, "Fluence": 2.4e-03, "Peak_Flux": 1200.0, "Hardness": 1.0},
+    "source": "fermi_gbm",
+    "year": 2013,
+    "official_ref": "https://heasarc.gsfc.nasa.gov/dbase/grb/fermigbrst.html"
+  },
+  {
+    "event_id": "S190814bv",
+    "event_class": "bns",
+    "trigger_time": "2019-08-14T21:10:39Z",
+    "ra_deg": null,
+    "dec_deg": null,
+    "error_radius_deg": null,
+    "distance_mpc": 267.0,
+    "skymap_url": "https://gracedb.ligo.org/api/superevents/S190814bv/files/Bayestar.fits.gz",
+    "alert_properties": {"BNS": 0.05, "NSBH": 0.9, "BBH": 0.0, "Terrestrial": 0.01, "HasNS": 1.0, "far": 2.0e-11},
+    "source": "gracedb",
+    "year": 2019,
+    "official_ref": "https://gracedb.ligo.org/superevents/S190814bv/view/"
+  },
+  {
     "event_id": "GRB170817A",
     "event_class": "grb",
     "trigger_time": "2017-08-17T12:41:06Z",
@@ -62,7 +90,7 @@
     "ra_deg": 54.51,
     "dec_deg": -26.94,
     "error_radius_deg": 1.5,
-    "distance_mpc": 1800.0,
+    "distance_mpc": 2300.0,
     "skymap_url": null,
     "alert_properties": {"T90": 25.0, "Fluence": 4.4e-05, "Peak_Flux": 22.0, "Hardness": 1.1},
     "source": "fermi_gbm",

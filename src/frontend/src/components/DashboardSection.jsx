@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import axios from 'axios'
 import AgentTerminal from './AgentTerminal'
+import { useHistoricalBatch, HistoricalSelector, HistoricalBatchResults } from './HistoricalSection'
 
 // One-line meaning for every agent status. MONITORING in particular is a
 // *finished* state (overcast / dome unsafe — nothing is running), which the
@@ -573,6 +574,22 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
     }
   }
 
+  // Attach a historical batch run to the SHARED observatory: fresh trace
+  // view, shared SSE stream, shared finish + report machinery.
+  const attachHistoricalRun = (rid) => {
+    if (!rid || finishedRef.current === rid) return
+    setExecutionTraces([])
+    setCandidates([])
+    setAlertData(null)
+    setReportMarkdown('')
+    setReportHtml('')
+    setRunError('')
+    setRunId(rid)
+    startEventStream(rid, () => finishRun(rid))
+  }
+
+  const historical = useHistoricalBatch({ onHistoricalRun: attachHistoricalRun })
+
   // Rich HTML report (embedded visualizations, calculation traces, print CSS) —
   // PRD M6.6. Falls back to the inline markdown renderer only if no HTML body
   // came back from the server.
@@ -658,9 +675,13 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             </motion.div>
           )}
 
+          {/* Live trigger (left) + historical archive (right): same pipeline,
+              same observatory, same report — different trigger sources. */}
+          <div className="grid lg:grid-cols-2 gap-6 mb-8 max-w-6xl mx-auto items-start text-left">
+            <div>
           {/* Cosmic events — one panel: pick the demo trigger (radio) and
               toggle live Kafka watch per family (persisted to backend). */}
-          <div className="max-w-3xl mx-auto mb-8 glass rounded-2xl border border-white/10 p-5 text-left">
+          <div className="glass rounded-2xl border border-white/10 p-5 text-left">
             <div className="font-mono text-[10px] text-gray-500 uppercase tracking-widest mb-1 text-center">
               Cosmic events {watchSaving && <span className="text-yellow-400">· saving…</span>}
             </div>
@@ -711,6 +732,7 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
             </div>
           </div>
 
+          <div className="text-center mt-6">
           <button
             onClick={simulateEvent}
             disabled={loading || streamState === 'live' || streamState === 'reconnecting'}
@@ -720,6 +742,10 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
               ? (wakingBackend ? 'WAKING BACKEND…' : streamState === 'reconnecting' ? 'RECONNECTING…' : 'PROCESSING…')
               : `LAUNCH ${((eventClasses.find((c) => c.key === simClass) || {}).label || simClass || 'GCN').toUpperCase()} ALERT`}
           </button>
+          </div>
+            </div>
+            <HistoricalSelector h={historical} disabled={loading} />
+          </div>
 
           {wakingBackend && loading && (
             <p className="font-mono text-xs text-yellow-400 mt-4 max-w-xl mx-auto">
@@ -872,6 +898,10 @@ export default function DashboardSection({ agentStatus, setAgentStatus, onTarget
           watchTopics={watchTopics}
           poller={poller}
         />
+
+        {/* Historical batch results — after the shared observatory trace,
+            same report flow per row (View report opens the full report). */}
+        <HistoricalBatchResults h={historical} />
 
         {/* Alert data */}
         {alertData && (
