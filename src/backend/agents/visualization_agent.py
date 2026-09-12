@@ -167,7 +167,10 @@ def plot_scoring_breakdown(candidates: List[Dict[str, Any]]) -> str:
     ax.axvline(0.0, color="#999", linewidth=0.8)
     ax.set_xlabel("Weighted contribution to composite score")
     ax.set_title("Scoring Breakdown per Candidate", fontsize=11)
-    ax.legend(loc="lower right", fontsize=7, ncol=2, framealpha=0.25)
+    # Legend below the axes (not over the bars): readable on dark print
+    # background and in the white-page HTML report alike.
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), fontsize=7, ncol=3, framealpha=0.3)
+    fig.tight_layout()
     ax.invert_yaxis()
     return _fig_to_base64(fig)
 

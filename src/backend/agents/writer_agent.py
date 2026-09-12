@@ -135,7 +135,12 @@ def _sci(value: Any, nd: int = 3, default: str = "—") -> str:
 
 
 def _candidate_trace_markdown(candidate: Dict[str, Any], event_class: str = "bns") -> List[str]:
-    """Step-by-step calculation trace — handwritten LaTeX audit (PRD 6.4.2)."""
+    """Step-by-step calculation trace in plain human-readable form (no LaTeX).
+
+    Renders with unicode symbols (×, →, −, α, Δ, °) so the HTML report reads
+    correctly even when MathJax is blocked (sandboxed iframe) and the printed
+    PDF stays legible. The LaTeX build (build_report_latex) keeps real TeX.
+    """
     profile = get_profile(event_class)
     active = set(profile.get("active_terms", []))
     lines: List[str] = []
@@ -145,77 +150,67 @@ def _candidate_trace_markdown(candidate: Dict[str, Any], event_class: str = "bns
     name = candidate.get("name", "Candidate")
     obs = candidate.get("observability") or {}
 
-    lines.append(f"#### Calculation Trace: {name} — handwritten-style audit")
+    lines.append(f"#### Calculation Trace: {name}")
     lines.append("")
-    steps: List[str] = []
-    steps.append("**Spatial containment** — "
-                 f"$P_{{\\text{{overlap}}}} = {_fmt(terms.get('spatial'))}$ "
-                 "(localization probability density at the candidate pixel, "
-                 "integrated over a 1 deg² follow-up field of view)")
+    lines.append("| Term | Value | How it was computed |")
+    lines.append("|---|---|---|")
+    lines.append(f"| Spatial containment (P_overlap) | {_fmt(terms.get('spatial'))} | Localization probability density at candidate pixel, integrated over 1 deg² follow-up field |")
     if "schechter" in active:
-        steps.append("**Schechter weight** — host luminosity "
-                     f"$L_K = {_sci(candidate.get('luminosity_k'))}$ against "
-                     f"$L_\\star = {_sci(weights.get('schechter_l_star'))}$, "
-                     f"slope $\\alpha = {_fmt(weights.get('schechter_alpha'), 1)}$ → "
-                     f"$w = {_fmt(terms.get('schechter'))}$")
-    steps.append("**Airmass (windowed)** — "
-                 f"$\\bar{{X}} = (1/N)\\sum \\sec z_k$ over 2 h (12 samples) -> "
-                 f"$\\bar{{X}} = {_fmt(terms.get('airmass'), 3)}$")
-    steps.append("**Atmospheric extinction** — "
-                 f"$\\Delta m = k\\,\\bar{{X}}$, $k = {_fmt(weights.get('zenith_extinction'), 2)}$ mag/airmass -> "
-                 f"$\\Delta m = {_fmt(obs.get('extinction_mag'))}$ mag")
-    steps.append("**Cloud penalty** — "
-                 f"$C = {_fmt(terms.get('cloud'), 3)}$ (fractional, from Open-Meteo)")
+        lines.append(f"| Schechter weight (w) | {_fmt(terms.get('schechter'))} | Host L_K = {_sci(candidate.get('luminosity_k'))} vs L_star = {_sci(weights.get('schechter_l_star'))}, slope α = {_fmt(weights.get('schechter_alpha'), 2)} |")
+    lines.append(f"| Airmass, windowed mean (Xbar) | {_fmt(terms.get('airmass'), 3)} | Mean of sec(z) over 2 h window (12 samples) |")
+    lines.append(f"| Atmospheric extinction (Δm) | {_fmt(obs.get('extinction_mag'), 3)} mag | Δm = k × Xbar, k = {_fmt(weights.get('zenith_extinction'), 3)} mag/airmass |")
+    lines.append(f"| Cloud penalty (C) | {_fmt(terms.get('cloud'), 3)} | Fractional cloud cover from Open-Meteo |")
     if "grb_boost" in active:
-        steps.append("**GRB boost** — "
-                     f"$B_\\text{{GRB}} = {_fmt(terms.get('grb_boost'), 1)}$ "
-                     "(3.0 when coincidence confirmed, else 0)")
+        lines.append(f"| GRB boost (B) | {_fmt(terms.get('grb_boost'), 1)} | 3.0 when coincidence confirmed, else 0 |")
     if "snr" in active:
-        steps.append("**SNR proxy** — at $d_L$ the kilonova appears at "
-                     f"$m = {_fmt(obs.get('apparent_mag'), 2)}$ -> "
-                     f"$\\text{{SNR}} = {_fmt(terms.get('snr'), 3)}$ "
-                     "(calibrated $m=17$ -> SNR 10, 0.4 dex/mag; 1-m, 300 s)")
+        lines.append(f"| SNR proxy | {_fmt(terms.get('snr'), 3)} | Kilonova at m = {_fmt(obs.get('apparent_mag'), 2)}; calibrated m=17 → SNR 10, 0.4 dex/mag (1-m, 300 s) |")
     if "flux" in active:
-        steps.append("**Burst flux proxy** — "
-                     f"$F = {_fmt(terms.get('flux'), 3)}$ "
-                     "(log-scaled fluence/peak-flux; $1.0$ at $10^{{-6}}$ erg cm$^{{-2}}$)")
+        lines.append(f"| Burst flux proxy (F) | {_fmt(terms.get('flux'), 3)} | Log-scaled fluence/peak-flux; 1.0 at 1e-6 erg/cm² |")
     if "signalness" in active:
-        steps.append("**Neutrino signalness** — "
-                     f"$s = {_fmt(terms.get('signalness'), 3)}$ "
-                     "(astrophysical probability from IceCube)")
-    steps.append("**Lunar penalty** — "
-                 f"Moon $\\Delta = {_fmt(obs.get('moon_separation_deg'), 2)}^\\circ$ -> "
-                 f"$L_\\text{{moon}} = {_fmt(terms.get('lunar'), 3)}$ "
-                 "(0 above $30^\\circ$, 1 below $10^\\circ$, linear)")
+        lines.append(f"| Neutrino signalness (s) | {_fmt(terms.get('signalness'), 3)} | Astrophysical probability from IceCube |")
+    lines.append(f"| Lunar penalty (L_moon) | {_fmt(terms.get('lunar'), 3)} | Moon separation Δ = {_fmt(obs.get('moon_separation_deg'), 2)} deg; 0 above 30 deg, 1 below 10 deg, linear |")
+    lines.append("")
     skipped = [t for t in ("schechter", "grb_boost", "snr", "flux", "signalness") if t not in active]
     if skipped:
-        steps.append(f"**Skipped for this event class:** {', '.join(skipped)} "
-                     "(weight 0 — not applicable, honest audit)")
-    # Handwritten-style substitution line — shows the arithmetic that a human would write
-    # e.g. S = 1.2×0.0242 + 1.5×0.600 −0.3×38.000 −0.25×0.000 −0.15×0.000 = −10.471
+        lines.append(f"Skipped for this event class: {', '.join(skipped)} (weight 0 — not applicable).")
+        lines.append("")
     try:
-        a = weights.get('alpha', weights.get('spatial_weight_alpha', 1.0))
-        b = weights.get('beta', weights.get('mass_weight_beta', 0))
-        g = weights.get('gamma', weights.get('extinction_gamma', 0.3))
-        d = weights.get('delta', weights.get('weather_delta', 0.25))
-        e = weights.get('epsilon', weights.get('coincidence_boost', 0))
-        z = weights.get('zeta', weights.get('snr_weight_zeta', 0))
-        et = weights.get('eta', weights.get('lunar_penalty_eta', 0.15))
-        th = weights.get('theta', 0)
-        ka = weights.get('kappa', 0)
-        # Build substitution string
-        subs = f"$S = {a:.2f}\\times{_fmt(terms.get('spatial'))} + {ka:.2f}\\times{_fmt(terms.get('signalness',0))} - {g:.2f}\\times{_fmt(terms.get('airmass'))} - {d:.2f}\\times{_fmt(terms.get('cloud'))} - {et:.2f}\\times{_fmt(terms.get('lunar'))}$ → **${_fmt(bd.get('total'))}$"
-        # For BNS include Schechter/SNR terms; for GRB include flux
+        a = float(weights.get('alpha', weights.get('spatial_weight_alpha', 1.0)))
+        b = float(weights.get('beta', weights.get('mass_weight_beta', 0)))
+        g = float(weights.get('gamma', weights.get('extinction_gamma', 0.3)))
+        d = float(weights.get('delta', weights.get('weather_delta', 0.25)))
+        e = float(weights.get('epsilon', weights.get('coincidence_boost', 0)))
+        z = float(weights.get('zeta', weights.get('snr_weight_zeta', 0)))
+        et = float(weights.get('eta', weights.get('lunar_penalty_eta', 0.15)))
+        th = float(weights.get('theta', 0))
+        ka = float(weights.get('kappa', 0))
+        sp = _fmt(terms.get('spatial'))
+        sc = _fmt(terms.get('schechter'))
+        am = _fmt(terms.get('airmass'))
+        cl = _fmt(terms.get('cloud'))
+        gb = _fmt(terms.get('grb_boost', 0))
+        sn = _fmt(terms.get('snr', 0))
+        lu = _fmt(terms.get('lunar'))
+        fx = _fmt(terms.get('flux', 0))
+        sg = _fmt(terms.get('signalness', 0))
         if "schechter" in active:
-            subs = f"$S = {a:.2f}\\times{_fmt(terms.get('spatial'))} + {b:.2f}\\times{_fmt(terms.get('schechter'))} - {g:.2f}\\times{_fmt(terms.get('airmass'))} - {d:.2f}\\times{_fmt(terms.get('cloud'))} + {e:.2f}\\times{_fmt(terms.get('grb_boost',0))} + {z:.2f}\\times{_fmt(terms.get('snr',0))} - {et:.2f}\\times{_fmt(terms.get('lunar'))}$ → **${_fmt(bd.get('total'))}$"
+            subs = (f"S = {a:.2f}×{sp} + {b:.2f}×{sc} − {g:.2f}×{am} − {d:.2f}×{cl} "
+                    f"+ {e:.2f}×{gb} + {z:.2f}×{sn} − {et:.2f}×{lu} = {_fmt(bd.get('total'))}")
         elif "flux" in active:
-            subs = f"$S = {a:.2f}\\times{_fmt(terms.get('spatial'))} + {th:.2f}\\times{_fmt(terms.get('flux',0))} - {g:.2f}\\times{_fmt(terms.get('airmass'))} - {d:.2f}\\times{_fmt(terms.get('cloud'))} - {et:.2f}\\times{_fmt(terms.get('lunar'))}$ → **${_fmt(bd.get('total'))}$"
-        steps.append(f"**Final score (handwritten substitution):** {subs}  \n*Formula* `{profile.get('formula', 'S')}` → *LaTeX* `$${profile.get('formula_tex', '')}$$`")
+            subs = (f"S = {a:.2f}×{sp} + {th:.2f}×{fx} − {g:.2f}×{am} − {d:.2f}×{cl} "
+                    f"− {et:.2f}×{lu} = {_fmt(bd.get('total'))}")
+        elif "signalness" in active:
+            subs = (f"S = {a:.2f}×{sp} + {ka:.2f}×{sg} − {g:.2f}×{am} − {d:.2f}×{cl} "
+                    f"− {et:.2f}×{lu} = {_fmt(bd.get('total'))}")
+        else:
+            subs = f"S = {_fmt(bd.get('total'))}"
+        lines.append(f"**Final score:** {subs}")
+        lines.append("")
+        lines.append(f"*Scoring formula for this class:* `{profile.get('formula', 'S')}`")
+        lines.append("")
     except Exception:
-        steps.append(f"**Final score:** {profile.get('formula', 'S')} = **{_fmt(bd.get('total'))}**")
-    for i, step in enumerate(steps, start=1):
-        lines.append(f"{i}. {step}")
-    lines.append("")
+        lines.append(f"**Final score:** {profile.get('formula', 'S')} = **{_fmt(bd.get('total'))}**")
+        lines.append("")
     return lines
 
 def _data_sources_table(record) -> List[str]:
@@ -260,11 +255,13 @@ def _classification_lines(event: Dict[str, Any]) -> List[str]:
 def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) -> str:
     """Full v3 Markdown report — organized as a publication-grade paper.
 
-    Order: Abstract → Introduction → Methodology (with data-source images in HTML) →
-    Results (sky + candidates + traces + conditions + tiling + schedule + viz) →
-    Discussion → Conclusion → LLM Rationale → GCN Draft → Data Sources → Log → FITS.
-    Every measurement carries its calculation trace; LLM prose is 2-3 sentences,
-    grounded in the trace context and labeled deterministic when keys absent.
+    Order: Executive Summary (LLM rationale + GCN draft, small font in HTML) →
+    1 Abstract → 2 Introduction → 3 Methodology (3.1 sources, 3.2 classification,
+    3.3 formula, 3.4 DAG) → 4 Results (4.1 visualizations, 4.2 event details,
+    4.3 sky, 4.4 candidates + trace tables, 4.5 conditions, 4.6 schedule) →
+    5 Discussion → 6 Conclusion → 7 Appendix (provenance, log, FITS).
+    All mathematics is plain human-readable unicode (no TeX delimiters) so the
+    sandboxed HTML preview and printed PDF stay legible without MathJax.
     """
     event = record.event or {}
     prov = record.provenance or {}
@@ -309,15 +306,52 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
         lines.append("**Fallback simulation:** no live trigger was pending at launch, so this run replays the archived GW170817 packet as a stand-in. Every downstream tier is labeled per stage — nothing is presented as live sky data.")
     lines.append("")
 
+    # Executive summary right after the title block — small font in HTML.
+    # Contains the decision-facing content (LLM rationale + GCN draft) so an
+    # observer sees the recommendation before the paper body.
+    lines.append("## Executive Summary")
+    lines.append("")
+    lines.append("<!-- executive-start -->")
+    if record.llm_rationale:
+        lines.append("### LLM Rationale")
+        lines.append("")
+        lines.append(record.llm_rationale)
+        lines.append("")
+        llm_s = event.get("llm_structured") if isinstance(event.get("llm_structured"), dict) else None
+        if llm_s:
+            lines.append(f"- **Decision:** `{llm_s.get('decision', '?')}` (confidence {llm_s.get('confidence', '?')})")
+            if llm_s.get("risks"):
+                lines.append(f"- **Risks:** {', '.join(str(r) for r in llm_s['risks'])}")
+            if llm_s.get("actions"):
+                lines.append(f"- **Suggested actions:** {', '.join(str(a) for a in llm_s['actions'])}")
+            if llm_s.get("citations"):
+                lines.append(f"- **Citations:** {', '.join(str(c) for c in llm_s['citations'])}")
+            lines.append("")
+    top_exec = record.candidates[0] if record.candidates else None
+    if top_exec:
+        lines.append("### GCN Circular Draft")
+        lines.append("")
+        lines.append(f"> **KilonovaScout follow-up of {event.get('ivorn', 'a LVC trigger')}**")
+        lines.append(">")
+        lines.append(f"> We identified {top_exec.get('name', 'a candidate host')} "
+                     f"(PGC {top_exec.get('pgc', '?')}, d_L = {_fmt(top_exec.get('distance_mpc'), 1)} Mpc) "
+                     "as the highest-priority host-galaxy candidate through "
+                     "autonomous multi-messenger triage (GLADE+ crossmatch, "
+                     "windowed airmass and lunar-separation filtering). "
+                     f"Composite prioritization score: {_fmt(top_exec.get('composite_score'), 3)}. "
+                     "Robotic follow-up is pending human approval.")
+        lines.append("")
+    lines.append("<!-- executive-end -->")
+
     # Abstract — always 2-3 sentences, 60-80 words, grounded
-    lines.append("## Abstract")
+    lines.append("## 1. Abstract")
     lines.append("")
     abs_text = _llm_draft("Abstract", base_ctx + " Write an Abstract of 2-3 sentences, 60-80 words, summarizing trigger, localization, top host/tiling, and recommendation. Formal tone.")
     lines.append(abs_text or _fallback_draft("Abstract", base_ctx))
     lines.append("")
 
     # Introduction — new section the user requested
-    lines.append("## Introduction")
+    lines.append("## 2. Introduction")
     lines.append("")
     intro_text = _llm_draft("Introduction", base_ctx + " Write an Introduction of 2-3 sentences, 60-80 words: multi-messenger context (GW/GRB/neutrino), the race against fading, and how KilonovaScout's DAG (HEALPix→catalog→weather→scoring→tiling→slew) accelerates it. Formal.")
     lines.append(intro_text or (
@@ -328,54 +362,76 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
     lines.append("")
 
     # Methodology — pipeline, data sources, classification, scoring
-    lines.append("## Methodology")
+    lines.append("## 3. Methodology")
     lines.append("")
     meth_text = _llm_draft("Methodology", base_ctx + " Write a Methodology of 2-3 sentences, 60-80 words: the staged DAG (ingestion→HEALPix→parallel catalog+weather→ephemeris→validator→scheduler→LLM+viz→FITS), the three-tier fallbacks (live/replay or point/cached/mock), and class-specific scoring. Formal, no invented numbers.")
     lines.append(meth_text or _fallback_draft("Methodology", base_ctx))
     lines.append("")
-    lines.append("### Data Sources")
+    lines.append("### 3.1 Data Sources")
     lines.append("")
     lines.extend(_data_sources_table(record))
-    lines.append("### Trigger Classification")
+    lines.append("### 3.2 Trigger Classification")
     lines.append("")
     lines.extend(f"- {line}" for line in _classification_lines(event))
     lines.append("")
-    lines.append("### Scoring Formula")
+    lines.append("### 3.3 Scoring Formula")
     lines.append("")
-    lines.append(f"$${profile.get('formula_tex', profile.get('formula', ''))}$$")
+    lines.append(f"Formula (this event class): `{profile.get('formula', '')}`")
     lines.append("")
     lines.append(f"*{profile.get('strategy', '')}*")
     lines.append("")
     # Pipeline overview (deterministic, not LLM)
-    lines.append("**Pipeline DAG:** `ingestion → HEALPix triage (FITS fallback chain or point-map synthesis) → parallel catalog (VizieR TAP 120→60 centroid filter → bundled cache → mock) + weather (Open-Meteo TTL-cached, dome re-check) → ephemeris (windowed airmass, atmospheric extinction, lunar separation) → GRB validator (BNS only, otherwise skipped) → TSP slew ordering → LLM rationale + visualizations in parallel → FITS header → human approval`. All tiers logged per stage.")
+    lines.append("### 3.4 Pipeline DAG")
+    lines.append("")
+    lines.append("ingestion → HEALPix triage (FITS fallback chain or point-map synthesis) → parallel catalog (VizieR TAP 120→60 centroid filter → bundled cache → mock) + weather (Open-Meteo TTL-cached, dome re-check) → ephemeris (windowed airmass, atmospheric extinction, lunar separation) → GRB validator (BNS only, otherwise skipped) → TSP slew ordering → LLM rationale + visualizations in parallel → FITS header → human approval. All tiers logged per stage.")
     lines.append("")
 
-    # Sky Localization — results section
-    lines.append("## Results")
+    # Results section — visualizations first (HTML embeds images here),
+    # then the event-details block, then all measurement subsections.
+    lines.append("## 4. Results")
     lines.append("")
-    lines.append("### Sky Localization")
+    lines.append("### 4.1 Visualizations")
     lines.append("")
-    lines.append("$$P(\\hat{n}) = \\mathrm{PROB}(\\hat{n}), \\quad d_L \\sim \\mathcal{N}(\\mu_{d}, \\sigma_{d}^2)$$")
+    lines.append("<!-- visualizations-anchor -->")
+    if viz_keys:
+        lines.append(f"Generated plots: `{', '.join(viz_keys)}` — skymap (Mollweide with candidates), scoring breakdown (horizontal bars), observing-conditions radar, and distance distribution. In the HTML/PDF report these embed as figures below — the scoring chart doubles as a visual audit of every candidate calculation.")
+        lines.append("")
+    lines.append("### 4.2 Event Details")
+    lines.append("")
+    lines.append(f"- **Event:** `{event.get('ivorn', 'unknown')}`")
+    lines.append(f"- **Trigger time:** `{event.get('event_time', 'unknown')}`")
+    lines.append(f"- **Run:** `{record.run_id}` ({record.source}) — status `{record.status}`")
+    lines.append(f"- **Generated:** {now}")
+    lines.append(f"- **Provenance:** skymap=`{prov.get('skymap', 'unknown')}` · catalog=`{prov.get('catalog', 'unknown')}` · event=`{prov.get('event', record.source)}` · weather=`{prov.get('weather', 'live')}`")
+    if (prov.get('event', record.source) or record.source) == "live":
+        lines.append("- **Live trigger:** this run processed a real notice from the NASA GCN stream.")
+    else:
+        lines.append("- **Fallback simulation:** no live trigger was pending at launch, so this run replays the archived GW170817 packet as a stand-in. Every downstream tier is labeled per stage — nothing is presented as live sky data.")
+    lines.append("")
+    lines.append("### 4.3 Sky Localization")
+    lines.append("")
+    lines.append("Sky probability follows the HEALPix PROB density; distance follows a probability-weighted Gaussian.")
     lines.append("")
     lines.append("#### Calculation Trace: Sky Localization")
     lines.append("")
-    lines.append("1. **Input:** FITS skymap, pixels sorted by PROB descending (`sorted_idx = argsort(PROB)[::-1]`)")
-    lines.append("2. **CDF:** cumulative probability C_k = Σ_{i≤k} P_i")
-    lines.append("3. **90% threshold:** select pixels where C_k ≤ 0.90")
+    lines.append("| Step | Computation | Result |")
+    lines.append("|---|---|---|")
+    lines.append("| 1. Input | FITS skymap, pixels sorted by PROB descending | sorted_idx = argsort(PROB), reversed |")
+    lines.append("| 2. CDF | Cumulative probability C_k = sum of P_i up to k | C_k in [0, 1] |")
+    lines.append("| 3. 90% threshold | Select pixels where C_k ≤ 0.90 | 90% credible set |")
     if sky.get("area_sq_deg") is not None:
-        lines.append(f"4. **Result:** 90% credible area = **{_fmt(sky.get('area_sq_deg'), 2)} deg²**, "
-                     f"{sky.get('pixel_count_90', '?')} pixels at NSIDE {sky.get('nside', '?')}")
+        lines.append(f"| 4. Result | 90% credible area = {_fmt(sky.get('area_sq_deg'), 2)} deg², "
+                     f"{sky.get('pixel_count_90', '?')} pixels at NSIDE {sky.get('nside', '?')} | 90% set |")
     else:
-        lines.append("4. **Result:** 90% credible region extracted from the skymap")
-    lines.append("5. **Distance:** d̄_L = Σ w_i·μ_i / Σ w_i (probability-weighted), "
-                 f"d̄ = {_fmt(sky.get('dist_mean'), 1)} Mpc, σ = {_fmt(sky.get('dist_std'), 1)} Mpc")
+        lines.append("| 4. Result | 90% credible region extracted from the skymap | 90% set |")
+    lines.append(f"| 5. Distance | Probability-weighted mean dL = {_fmt(sky.get('dist_mean'), 1)} Mpc, sigma = {_fmt(sky.get('dist_std'), 1)} Mpc | dL ± σ |")
     lines.append("")
     if sky.get("area_sq_deg") is not None and sky.get("area_sq_deg", 0) > 5:
         lines.append(f"> **Note:** localization spans {sky.get('area_sq_deg'):.1f} deg² (degree-scale). Host list below is advisory; tiling (see Observatory Conditions) covers the error circle more efficiently.")
         lines.append("")
 
     # Galaxy Candidates — core results
-    lines.append("### Galaxy Candidates")
+    lines.append("### 4.4 Galaxy Candidates")
     lines.append("")
     if event_class in ("grb", "neutrino"):
         lines.append("> **Field strategy:** candidates are *reference* hosts in the error region. Afterglow/neutrino localization is degree-scale, so the ranked tiling (see below) — not this host list — drives the observing plan. Scores compress when all hosts share similar airmass (e.g., below horizon at current LST).")
@@ -393,13 +449,15 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
             f"| `{cand.get('catalog_source', 'unknown')}` |"
         )
     lines.append("")
+    lines.append("The scoring-breakdown chart (see Visualizations) shows each candidate's weighted term contributions as stacked bars — a visual audit matching the tables below.")
+    lines.append("")
     for cand in record.candidates:
         lines.extend(_candidate_trace_markdown(cand, event_class))
 
     # Observatory Conditions — part of Results
     weather = record.weather
     if weather:
-        lines.append("### Observatory Conditions")
+        lines.append("### 4.5 Observatory Conditions")
         lines.append("")
         lines.append(f"- Site: `{weather.get('observatory_name')}` "
                      f"(lat = {weather.get('latitude')}, lon = {weather.get('longitude')}, alt = {weather.get('alt', '—')} m)")
@@ -410,85 +468,51 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
         lines.append("")
         lines.append("#### Calculation Trace: Observatory Conditions")
         lines.append("")
-        lines.append("1. **Cloud cover:** C = cloudcover/100 from `GET api.open-meteo.com/v1/forecast?latitude=…`")
-        lines.append("2. **Humidity:** H = relativehumidity_2m (%); dome safe ⟺ H ≤ 85 % and C ≤ 40 %")
-        lines.append("3. **Airmass integral:** X̄ = (1/12)·Σ_{k=1..12} sec(z_k) sampled over a 2-hour window")
+        lines.append("| Check | Computation | Result |")
+        lines.append("|---|---|---|")
+        lines.append("| Cloud cover | C = cloudcover / 100 from Open-Meteo | C = fractional 0–1 |")
+        lines.append("| Humidity | H = relativehumidity_2m in %; dome safe iff H ≤ 85% and C ≤ 40% | dome safe true/false |")
+        lines.append("| Airmass integral | Xbar = mean of sec(z) over 2 h window (12 samples) | Xbar ≥ 1.0; 38 means below horizon |")
         lines.append("")
         if tiling and tiling.get("tiles"):
             lines.append(f"**Tiling (field strategy):** {len(tiling['tiles'])} pointings on a 3×3 grid (FOV {tiling.get('fov_deg', 1)}°) centered at RA {tiling.get('center_ra', '?')} Dec {tiling.get('center_dec', '?')}. Use when host ranking is ambiguous or all hosts are below horizon at current LST.")
             lines.append("")
 
     if record.slew_script:
-        lines.append("### Observation Schedule")
+        lines.append("### 4.6 Observation Schedule")
         lines.append("")
-        lines.append("Slew order optimized with a greedy nearest-neighbor TSP heuristic on the local alt/az sphere (PRD M7.2).")
+        lines.append("Slew order optimized with a greedy nearest-neighbor TSP heuristic on the local alt/az sphere (PRD M7.2). Requires human approval before execution (see Conclusion).")
         lines.append("")
         lines.append("```xml")
         lines.append(record.slew_script)
         lines.append("```")
         lines.append("")
 
-    # Visualizations note (images embedded in HTML, referenced in Markdown)
-    if viz_keys:
-        lines.append("### Visualizations")
-        lines.append("")
-        lines.append(f"Generated plots: `{', '.join(viz_keys)}`. In the HTML/PDF report these embed as base64 PNGs — skymap (Mollweide with candidates), scoring breakdown (horizontal bars), and observing-conditions radar. See the HTML report for the figures.")
-        lines.append("")
-
     # Discussion — LLM 2-3 lines
-    lines.append("## Discussion")
+    lines.append("## 5. Discussion")
     lines.append("")
     disc_text = _llm_draft("Discussion", base_ctx + " Write a Discussion of 2-3 sentences, 60-80 words: what the numbers mean (e.g., low P_overlap but high Schechter weight, or uniform airmass 38 below horizon compressing scores, or tiling vs host trade-off). Formal, no invented numbers.")
     lines.append(disc_text or _fallback_draft("Discussion", base_ctx))
     lines.append("")
 
     # Conclusion — LLM 2-3 lines
-    lines.append("## Conclusion")
+    lines.append("## 6. Conclusion")
     lines.append("")
     concl_text = _llm_draft("Conclusion", base_ctx + " Write a Conclusion of 2-3 sentences, 60-80 words: approve/monitor/reject with explicit next steps (approve if dome safe and top P>0.02 else monitor/tiling, re-check at night if below horizon). Formal.")
     lines.append(concl_text or _fallback_draft("Conclusion", base_ctx))
     lines.append("")
 
-    # LLM Rationale — structured 6-field when available
-    if record.llm_rationale:
-        lines.append("## LLM Rationale")
-        lines.append("")
-        lines.append(record.llm_rationale)
-        lines.append("")
-        # Structured fields if present in event
-        llm_s = event.get("llm_structured") if isinstance(event.get("llm_structured"), dict) else None
-        if llm_s:
-            lines.append(f"- **Decision:** `{llm_s.get('decision', '?')}` (confidence {llm_s.get('confidence', '?')})")
-            if llm_s.get("risks"):
-                lines.append(f"- **Risks:** {', '.join(str(r) for r in llm_s['risks'])}")
-            if llm_s.get("actions"):
-                lines.append(f"- **Suggested actions:** {', '.join(str(a) for a in llm_s['actions'])}")
-            if llm_s.get("citations"):
-                lines.append(f"- **Citations:** {', '.join(str(c) for c in llm_s['citations'])}")
-            lines.append("")
-
-    top = record.candidates[0] if record.candidates else None
-    if top:
-        lines.append("## GCN Circular Draft")
-        lines.append("")
-        lines.append(f"> **KilonovaScout follow-up of {event.get('ivorn', 'a LVC trigger')}**")
-        lines.append(">")
-        lines.append(f"> We identified {top.get('name', 'a candidate host')} "
-                     f"(PGC {top.get('pgc', '?')}, d_L = {_fmt(top.get('distance_mpc'), 1)} Mpc) "
-                     "as the highest-priority host-galaxy candidate through "
-                     "autonomous multi-messenger triage (GLADE+ crossmatch, "
-                     "windowed airmass and lunar-separation filtering). "
-                     f"Composite prioritization score: {_fmt(top.get('composite_score'), 3)}. "
-                     "Robotic follow-up is pending human approval.")
-        lines.append("")
-
-    lines.append("## Data Sources & Provenance")
+    # Appendix — machine-readable audit trail (decision content lives in
+    # Executive Summary at the top; not duplicated here).
+    lines.append("## 7. Appendix")
+    lines.append("")
+    lines.append("### 7.1 Data Sources & Provenance")
     lines.append("")
     lines.extend(_data_sources_table(record))
     lines.append("Provenance is attached per stage and echoed in the dashboard badge and FITS header. Live/replay/point/cached/synthetic/mock are never conflated.")
     lines.append("")
 
-    lines.append("## Pipeline Execution Log")
+    lines.append("### 7.2 Pipeline Execution Log")
     lines.append("")
     lines.append("| Step | Tool | Status | Attempt | Duration (ms) |")
     lines.append("|---|---|---|---|---|")
@@ -498,7 +522,7 @@ def build_report_markdown(record, weights: Optional[Dict[str, float]] = None) ->
     lines.append("")
 
     if record.observation_header:
-        lines.append("## FITS Observation Header")
+        lines.append("### 7.3 FITS Observation Header")
         lines.append("")
         lines.append("```text")
         lines.append(record.observation_header)
@@ -536,13 +560,21 @@ _PRINT_CSS = """
   .math { text-align: center; font-size: 1.08em; background: #f7f7f9; border: 1px solid #e0e0e0; border-radius: 8px; padding: 14px 12px; margin: 16px 0; font-family: 'EB Garamond', serif; }
   .math-tex { font-family: 'EB Garamond', serif; }
   .calc-step { margin: 6px 0 6px 18px; padding-left: 12px; border-left: 2px solid #e8e8e8; }
-  @media print { body { padding: 0; } @page { margin: 18mm 16mm; } }
+  .executive { font-size: 0.85em; line-height: 1.5; background: #f8fafc; border: 1px solid #dbe4ec; border-radius: 8px; padding: 12px 16px; margin: 18px 0 8px; }
+  .executive h3 { font-size: 0.95em; margin-top: 10px; }
+  .executive blockquote { font-size: 0.95em; }
+  figure { margin: 16px 0; }
+  figcaption { font-family: 'Inter', sans-serif; font-size: 0.82em; color: #444; margin-top: 6px; line-height: 1.45; }
+  @media print { body { padding: 0; } @page { margin: 18mm 16mm; } .executive { background: #fff; } }
 """
 
 
 def _md_inline(text: str) -> str:
     """Very small markdown-inline renderer for the HTML report."""
+    import re
     text = _html.escape(text)
+    # `code` spans first so ** inside code is not mis-parsed
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
     while "**" in text:
         text = text.replace("**", "<strong>", 1).replace("**", "</strong>", 1)
     return text
@@ -629,13 +661,54 @@ def build_report_html(record, weights: Optional[Dict[str, float]] = None,
         for key, val in prov.items()
     ) or '<span class="provenance-badge">provenance: unknown</span>'
 
+    # Human-readable figure captions (A.R.I.E.S insight: every figure needs a
+    # one-line "what to look at" caption, not just a filename).
+    _CAPTIONS = {
+        "skymap_candidates": "Figure 1 — 90% localization region (Mollweide) with ranked host candidates overlaid as red stars. The color bar is relative probability density (normalized).",
+        "scoring_breakdown": "Figure 2 — Scoring breakdown per candidate: stacked bars show each term's weighted contribution to the composite score (spatial, Schechter, airmass, cloud, GRB/SNR, lunar). Longer bars to the right mean stronger follow-up priority.",
+        "observing_conditions": "Figure 3 — Observing-conditions radar (normalized 0–1): altitude coverage, inverse airmass, moon separation, and SNR proxy for the top candidates. Larger polygons mean better observability.",
+        "distance_distribution": "Figure 4 — Candidate luminosity distances vs the skymap's probability-weighted distance band (shaded, mean ± sigma).",
+    }
+    # Visualization figures (Milestone 8), embedded as data URIs.
+    # They are injected at the <!-- visualizations-anchor --> inside Results,
+    # not at the top of the document.
+    viz_html = ""
+    if visualizations:
+        order = ["skymap_candidates", "scoring_breakdown", "observing_conditions", "distance_distribution"]
+        for name in order + [k for k in visualizations.keys() if k not in order]:
+            b64 = visualizations.get(name)
+            if not b64:
+                continue
+            cap = _CAPTIONS.get(name, name.replace("_", " "))
+            viz_html += (
+                f"<figure><img class='viz' src='data:image/png;base64,{b64}' "
+                f"alt='{_html.escape(name)}'/>"
+                f"<figcaption>{_html.escape(cap)}</figcaption></figure>"
+            )
+
     # Convert the Markdown report block by block into styled HTML.
     md = build_report_markdown(record, weights)
     body: List[str] = []
     i = 0
     md_lines = md.split("\n")
+    in_executive = False
     while i < len(md_lines):
         line = md_lines[i]
+        if "<!-- executive-start -->" in line:
+            body.append("<div class='executive'>")
+            in_executive = True
+            i += 1
+            continue
+        if "<!-- executive-end -->" in line:
+            body.append("</div>")
+            in_executive = False
+            i += 1
+            continue
+        if "<!-- visualizations-anchor -->" in line:
+            if viz_html:
+                body.append(viz_html)
+            i += 1
+            continue
         if line.startswith("| "):
             tbl: List[str] = []
             while i < len(md_lines) and md_lines[i].startswith("|"):
@@ -655,9 +728,8 @@ def build_report_html(record, weights: Optional[Dict[str, float]] = None,
                         f"{_html.escape(chr(10).join(block))}</code></pre>")
             continue
         if line.startswith("$$"):
-            # Keep raw LaTeX for MathJax + unicode fallback for print without JS
             raw_tex = line.strip().strip("$").strip()
-            body.append(f"<p class='math' data-tex='{ _html.escape(raw_tex)}'>{_math_to_html(line)}<span class='math-tex' style='display:none'>$$ { _html.escape(raw_tex)} $$</span></p>")
+            body.append(f"<p class='math'>{_math_to_html(line)}<span class='math-tex' style='display:none'>$$ { _html.escape(raw_tex)} $$</span></p>")
         elif line.startswith("#### "):
             body.append(f"<h4>{_md_inline(line[5:])}</h4>")
         elif line.startswith("### "):
@@ -677,16 +749,8 @@ def build_report_html(record, weights: Optional[Dict[str, float]] = None,
         elif line.strip():
             body.append(f"<p>{_md_inline(line)}</p>")
         i += 1
-
-    # Visualization figures (Milestone 8), embedded as data URIs
-    viz_html = ""
-    if visualizations:
-        for name, b64 in visualizations.items():
-            viz_html += (
-                f"<figure><img class='viz' src='data:image/png;base64,{b64}' "
-                f"alt='{_html.escape(name)}'/>"
-                f"<figcaption style='font-size:0.8em;color:#555'>{_html.escape(name)}</figcaption></figure>"
-            )
+    if in_executive:
+        body.append("</div>")
 
     # The markdown's own "# ..." title is superseded by the academic title
     # block above — drop it so the report does not print two titles.
@@ -699,7 +763,6 @@ window.MathJax = { tex: { inlineMath: [['$','$'], ['\\(','\\)']], displayMath: [
 </script>
 <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 """
-    rest = chr(10).join(body)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -711,9 +774,8 @@ window.MathJax = { tex: { inlineMath: [['$','$'], ['\\(','\\)']], displayMath: [
 <body>
 {_title_block_html(record)}
 <div style="margin:10px 0">{badges}</div>
-{viz_html}
 {rest}
-<footer>Report ID {_html.escape(record.run_id)} — calculation traces reflect the exact values computed by the pipeline scoring tool. Equations rendered with MathJax; print to PDF preserves vector math.</footer>
+<footer>Report ID {_html.escape(record.run_id)} — calculation traces reflect the exact values computed by the pipeline scoring tool. All mathematics is rendered in plain human-readable form; MathJax enhances the print view where scripts are allowed.</footer>
 </body>
 </html>"""
 
