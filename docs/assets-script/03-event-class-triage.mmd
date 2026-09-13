@@ -1,0 +1,45 @@
+graph TB
+    TRIGGER["Incoming Alert\nVOEvent XML"] --> PARSE["parse_topic()\nIdentify event class"]
+
+    PARSE -->|"LVC INITIAL/PRELIMINARY"| BNS["BNS Path\nNeutron-Star Merger"]
+    PARSE -->|"Fermi-GBM Alert/Fin-Pos\nSwift-BAT Alert"| GRB["GRB Path\nGamma-Ray Burst"]
+    PARSE -->|"IceCube Gold/Bronze\nAMON streams"| NEUTRINO["Neutrino Path\nHigh-Energy Neutrino"]
+
+    BNS --> BNS_GATE{"BNS Gate\nHasNS component?\nFAR < 1/yr?"}
+    GRB --> GRB_GATE{"GRB Gate\nT90 duration?\nFluence/peak-flux?"}
+    NEUTRINO --> NU_GATE{"Neutrino Gate\nSignalness?\nGold >= 0.5 / Bronze >= 0.3"}
+
+    BNS_GATE -->|"ACCEPTED"| BNS_PIPELINE["Full 7-term scoring\nSchechter host mass\nFITS skymap download"]
+    BNS_GATE -->|"REJECTED"| REJECT["Rejected\nLogged with reason"]
+
+    GRB_GATE -->|"ACCEPTED"| GRB_PIPELINE["Burst-flux proxy scoring\nPoint-localized HEALPix\nfrom RA/Dec + error radius"]
+    GRB_GATE -->|"REJECTED"| REJECT
+
+    NU_GATE -->|"ACCEPTED"| NU_PIPELINE["Containment + signalness scoring\nkappa over degree-scale region\nTiling guidance"]
+    NU_GATE -->|"REJECTED"| REJECT
+
+    BNS_PIPELINE --> SKYMAP{"Skymap Source?"}
+    GRB_PIPELINE --> SKYMAP
+    NU_PIPELINE --> SKYMAP
+
+    SKYMAP -->|"FITS URL available"| FITS["Live FITS download\nbayestar.fits.gz"]
+    SKYMAP -->|"No FITS, has RA/Dec"| POINT["Build point map\nfrom error circle"]
+    SKYMAP -->|"No URL, no position"| BUNDLE["Bundled replay\nbayestar.fits.gz"]
+
+    FITS --> CATALOG["GLADE+ crossmatch\nVizieR TAP"]
+    POINT --> CATALOG
+    BUNDLE --> CATALOG
+
+    CATALOG --> SCHEDULE["TSP slew scheduling\nASCOM/INDI XML"]
+    SCHEDULE --> REPORT["Writer Agent\nMarkdown + HTML + LaTeX"]
+    REPORT --> HUMAN["Human Approval"]
+
+    style TRIGGER fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#000
+    style BNS fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000
+    style GRB fill:#fff9c4,stroke:#f9a825,stroke-width:2px,color:#000
+    style NEUTRINO fill:#f8bbd0,stroke:#ad1457,stroke-width:2px,color:#000
+    style REJECT fill:#e0e0e0,stroke:#616161,stroke-width:2px,color:#000
+    style FITS fill:#b2ebf2,stroke:#00838f,stroke-width:2px,color:#000
+    style POINT fill:#b2ebf2,stroke:#00838f,stroke-width:2px,color:#000
+    style BUNDLE fill:#e0e0e0,stroke:#616161,stroke-width:2px,color:#000
+    style HUMAN fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000

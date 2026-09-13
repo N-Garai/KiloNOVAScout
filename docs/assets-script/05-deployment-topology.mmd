@@ -1,0 +1,68 @@
+graph TB
+    subgraph RENDER["Render Free Tier 512 MB RAM"]
+        DOCKER["Docker Multi-Stage Build\nPython 3.11 > Node 20 > Python 3.11"]
+        subgraph BACKEND["Backend Container"]
+            FASTAPI["FastAPI + Uvicorn\nport auto-assigned"]
+            AGENT["KilonovaScoutAgent\nStrands SDK orchestrator"]
+            TOOLS["Tool Suite\n18 tools + scoring"]
+            VIZ["Visualization Agent\nmatplotlib Agg backend"]
+            WRITER["Writer Agent\nMarkdown + HTML + LaTeX"]
+        end
+        subgraph FRONTEND["Frontend static"]
+            REACT["React 18 + Vite\nTailwind CSS"]
+            SSE["SSE Stream\napi/runs/id/events"]
+        end
+    end
+
+    subgraph APIS["External APIs all free"]
+        GCNAPI["NASA GCN Kafka\nkafka.gcn.nasa.gov:9092"]
+        GRACEDBAPI["NASA GraceDB REST\ngracedb.ligo.org/api"]
+        VIZIERAPI["CDS VizieR TAP\ntapvizier.cds.unistra.fr"]
+        OPENMETEOAPI["Open-Meteo API\napi.open-meteo.com"]
+    end
+
+    subgraph LLMAPIS["LLM Providers"]
+        GEMINI["Google Gemini 2.5 Flash\naistudio.google.com"]
+        GROQ["Groq gpt-oss-120b\nconsole.groq.com"]
+    end
+
+    subgraph ALERTS["Alerting optional"]
+        NTFY["ntfy.sh\nzero-setup push"]
+        SMTP["SMTP Digest\ndaily summary"]
+        WEBHOOK["Custom Webhook\nDiscord / Slack / PagerDuty"]
+    end
+
+    subgraph USER["User"]
+        BROWSER["Web Browser\nlocalhost:5173 or Render URL"]
+    end
+
+    DOCKER --> FASTAPI
+    FASTAPI --> AGENT
+    AGENT --> TOOLS
+    AGENT --> VIZ
+    AGENT --> WRITER
+    REACT --> SSE
+    SSE --> FASTAPI
+
+    AGENT -->|"HTTPS"| GCNAPI
+    AGENT -->|"HTTPS"| GRACEDBAPI
+    TOOLS -->|"HTTPS ADQL"| VIZIERAPI
+    TOOLS -->|"HTTPS"| OPENMETEOAPI
+
+    AGENT -->|"API key"| GEMINI
+    AGENT -->|"API key"| GROQ
+
+    AGENT -->|"HTTP POST"| NTFY
+    AGENT -->|"SMTP"| SMTP
+    AGENT -->|"HTTP POST"| WEBHOOK
+
+    BROWSER -->|"HTTP"| FASTAPI
+    BROWSER -->|"static files"| REACT
+
+    style RENDER fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    style BACKEND fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style FRONTEND fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style APIS fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000
+    style LLMAPIS fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#000
+    style ALERTS fill:#e0f7fa,stroke:#006064,stroke-width:2px,color:#000
+    style USER fill:#e8f4f8,stroke:#0066cc,stroke-width:2px,color:#000

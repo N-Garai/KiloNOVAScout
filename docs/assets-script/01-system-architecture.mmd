@@ -1,0 +1,99 @@
+graph TB
+    subgraph EXTERNAL["External Data Sources"]
+        GCN["NASA GCN Kafka\nVOEvent XML push"]
+        GRACEDB["NASA GraceDB REST\nBNS superevents polling"]
+        VIZIER["CDS VizieR TAP\nGLADE+ catalog (anonymous)"]
+        OPENMETEO["Open-Meteo API\nWeather (keyless)"]
+        FERMIAPI["Fermi GBM / Swift BAT\nGRB notices"]
+        ICECUBE["IceCube AMON\nNeutrino notices"]
+    end
+
+    subgraph INGESTION["Stage 1: Ingestion"]
+        KAFKA["gcn-kafka client\nSubscribes to VOEvent topics"]
+        POLLER["GraceDB Poller\nHTTPS polling (IPv4)"]
+        SIM["EventSimulator\nMock GW170817 / GRB / Neutrino"]
+        GATE["Event Class Gate\nevaluate_trigger()\nBNS / GRB / Neutrino triage"]
+    end
+
+    subgraph CORE["Strands Orchestrator Agent"]
+        direction TB
+        S2["Stage 2: HEALPix Parse\nparse_healpix_map() or\nbuild_point_skymap()"]
+        S3["Stage 3: Galaxy Catalog\nquery_glade_catalog()\nVizieR TAP ADQL"]
+        S4["Stage 4: Weather\ncheck_observatory_weather()\nOpen-Meteo + airmass"]
+        S3_4["asyncio.gather\n(catalog parallel weather)"]
+        S5["Stage 5: Ephemeris\nObservability + moon check"]
+        S6["Stage 6: Validator\nGRB coincidence check"]
+        S7["Stage 7: Scheduler\ngenerate_telescope_slew_script()\nTSP nearest-neighbor"]
+        S8["Stage 8: Dome Safety\ncheck_dome_safety()\nMid-sequence re-check"]
+        S9["Stage 9: LLM + Viz\nreason_about_event() parallel\ngenerate_run_visualizations()"]
+        S10["Stage 10: FITS Header\nwrite_observation_header()"]
+    end
+
+    subgraph TOOLS["Scoring Engine"]
+        SCORE["7-term composite scoring\nS = alpha*P + beta*w_Schechter - gamma*X - delta*C + epsilon*B + zeta*SNR - eta*L_moon"]
+        SCHECHTER["Schechter Luminosity\nFunction Weighting"]
+        AIRMASS["Windowed 2-hour\nAirmass Integration"]
+        LUNAR["Lunar Proximity\nPenalty"]
+    end
+
+    subgraph SUBAGENTS["Hook-Gated Specialists"]
+        RETRACT["RetractionAgent\nBeforeInvocationEvent"]
+        COINCIDENCE["CoincidenceAgent\nAfterToolCallEvent"]
+        ANOMALY["AnomalyAgent\nAfterToolCallEvent"]
+    end
+
+    subgraph HUMAN["Human-in-the-Loop"]
+        APPROVAL["Approval Gate\nAPPROVE / REJECT"]
+        SLEW["Telescope Slew\nASCOM/INDI XML"]
+    end
+
+    subgraph OUTPUT["Output Layer"]
+        REPORT["Writer Agent\nMarkdown + HTML + LaTeX"]
+        FITS["FITS Observation Header\n31-card standard"]
+        WEBHOOK["Webhook / Email\nntfy.sh / SMTP digest"]
+    end
+
+    GCN --> KAFKA
+    GRACEDB --> POLLER
+    KAFKA --> GATE
+    POLLER --> GATE
+    SIM --> GATE
+    GATE --> S2
+    FERMIAPI -.->|subscribes| KAFKA
+    ICECUBE -.->|subscribes| KAFKA
+
+    S2 --> S3_4
+    S3 --> S3_4
+    S4 --> S3_4
+    S3_4 --> S5
+    S5 --> S6
+    S6 --> S7
+    S7 --> S8
+    S8 --> S9
+    S9 --> S10
+
+    VIZIER -.-> S3
+    OPENMETEO -.-> S4
+
+    S5 --> SCORE
+    SCORE --> SCHECHTER
+    SCORE --> AIRMASS
+    SCORE --> LUNAR
+
+    S2 -.-> RETRACT
+    S3_4 -.-> COINCIDENCE
+    S3_4 -.-> ANOMALY
+
+    S10 --> APPROVAL
+    APPROVAL --> SLEW
+    S10 --> REPORT
+    S10 --> FITS
+    APPROVAL --> WEBHOOK
+
+    style EXTERNAL fill:#e8f4f8,stroke:#0066cc,stroke-width:2px,color:#000
+    style INGESTION fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000
+    style CORE fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    style TOOLS fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style SUBAGENTS fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#000
+    style HUMAN fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style OUTPUT fill:#fff8e1,stroke:#f9a825,stroke-width:2px,color:#000

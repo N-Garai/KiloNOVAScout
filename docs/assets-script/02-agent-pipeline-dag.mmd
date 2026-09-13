@@ -1,0 +1,31 @@
+graph LR
+    A["1. Ingestion\nfilter_gcn()\nEvent class gate"] --> B["2. HEALPix Parse\nparse_healpix_map()\nor point_localize()"]
+    B --> C["3. Galaxy Catalog\nquery_glade_catalog()\nVizieR TAP"]
+    B --> D["4. Weather\ncheck_observatory_weather()\nOpen-Meteo"]
+    C --> E["asyncio.gather\n(3 parallel 4)"]
+    D --> E
+    E --> F["5. Ephemeris\nObservability\nMoon check"]
+    F --> G["6. Validator\nGRB coincidence\n(BNS only)"]
+    G --> H["7. Scheduler\ngenerate_slew_script()\nTSP nearest-neighbor"]
+    H --> I["8. Dome Safety\ncheck_dome_safety()\nMid-sequence re-check"]
+    I --> J["9a. LLM Rationale\nreason_about_event()\n6-field JSON"]
+    I --> K["9b. Visualizations\ngenerate_run_visualizations()\n2-4 from 7 plot pool"]
+    J --> L["10. FITS Header\nwrite_observation_header()\n31 cards"]
+    K --> L
+    L --> M["Report\nMarkdown + HTML + LaTeX"]
+    L --> N["Approval Gate\nAPPROVE / REJECT"]
+
+    style A fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#000
+    style B fill:#b2ebf2,stroke:#00838f,stroke-width:2px,color:#000
+    style C fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#000
+    style D fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style E fill:#d1c4e9,stroke:#4527a0,stroke-width:2px,color:#000
+    style F fill:#fff9c4,stroke:#f9a825,stroke-width:2px,color:#000
+    style G fill:#f8bbd0,stroke:#ad1457,stroke-width:2px,color:#000
+    style H fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000
+    style I fill:#d1c4e9,stroke:#4527a0,stroke-width:2px,color:#000
+    style J fill:#b2dfdb,stroke:#00695c,stroke-width:2px,color:#000
+    style K fill:#b2dfdb,stroke:#00695c,stroke-width:2px,color:#000
+    style L fill:#f8bbd0,stroke:#ad1457,stroke-width:2px,color:#000
+    style M fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#000
+    style N fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000

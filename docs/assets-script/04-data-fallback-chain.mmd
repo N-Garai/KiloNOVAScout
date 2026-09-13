@@ -1,0 +1,44 @@
+graph TB
+    subgraph SKYMAP["Skymap Data"]
+        S1["Live FITS download\nfrom notice URL"] -->|"HTTP error\nor timeout"| S2["Bundled bayestar.fits.gz\nGW170817 replay"]
+        S2 -->|"File missing"| S3["Calibrated synthetic\nreconstruction"]
+    end
+
+    subgraph CATALOG["Galaxy Catalog"]
+        C1["Live CDS VizieR TAP\nanonymous ADQL"] -->|"API down\nor empty"| C2["Bundled GW170817\n29 real GLADE+ galaxies"]
+        C2 -->|"File missing"| C3["Deterministic mock\nrows"]
+    end
+
+    subgraph WEATHER["Weather Data"]
+        W1["Live Open-Meteo API\nkeyless HTTP"] -->|"API error\nor timeout"| W2["Safe-default snapshot\nlabeled fallback"]
+    end
+
+    subgraph LLM["LLM Reasoning"]
+        L1["Google Gemini 2.5 Flash\nprimary model"] -->|"Rate limit\nor error"| L2["Groq gpt-oss-120b\nfallback model"]
+        L2 -->|"Also fails"| L3["Deterministic summary\nalways works, zero keys"]
+    end
+
+    subgraph TRIGGER["Trigger Source"]
+        T1["NASA GCN Kafka\npush (VOEvent)"] -->|"Kafka down\nor IPv6 blocked"| T2["GraceDB REST poller\nHTTPS IPv4"]
+        T2 -->|"Poller disabled"| T3["EventSimulator\nmock GW170817 payload"]
+    end
+
+    subgraph PROVENANCE["Provenance Tracking"]
+        P["run_record.provenance\nskymap, catalog, event, weather"]
+    end
+
+    S1 -->|"tier=live"| P
+    S2 -->|"tier=replay"| P
+    S3 -->|"tier=synthetic"| P
+    C1 -->|"tier=live"| P
+    C2 -->|"tier=cached"| P
+    C3 -->|"tier=mock"| P
+    W1 -->|"tier=live"| P
+    W2 -->|"tier=fallback"| P
+
+    style SKYMAP fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    style CATALOG fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style WEATHER fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style LLM fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000
+    style TRIGGER fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#000
+    style PROVENANCE fill:#e0f7fa,stroke:#006064,stroke-width:2px,color:#000

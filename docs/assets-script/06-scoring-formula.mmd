@@ -1,0 +1,53 @@
+graph TB
+    subgraph FORMULA["7-Term Composite Scoring Formula"]
+        S["Si = alpha*Pspatial + beta*wSchechter - gamma*Xbar - delta*C + epsilon*BGRB + zeta*SNR - eta*Lmoon"]
+    end
+
+    subgraph TERMS["Individual Score Terms"]
+        direction LR
+        T1["alpha = 1.0\nPspatial\nSpatial containment\nprobability from\nHEALPix skymap"]
+        T2["beta = 0.5\nwSchechter\nSchechter luminosity\nfunction weight\nLstar = 10^10.16 Lsun"]
+        T3["gamma = 0.3\nXbar\nWindowed 2-hour\nairmass integration\nR-band extinction"]
+        T4["delta = 0.2\nC\nCloud cover\npenalty from\nOpen-Meteo"]
+        T5["epsilon = 3.0\nBGRB\nGRB coincidence\nboost additive\nwhen detected"]
+        T6["zeta = 0.15\nSNR\nDistance-based\nkilonova SNR\nproxy"]
+        T7["eta = 0.1\nLmoon\nLunar proximity\npenalty\nphase + distance"]
+    end
+
+    subgraph INPUTS["Data Inputs"]
+        IN1["HEALPix Skymap\nprobability per pixel"]
+        IN2["GLADE+ Catalog\ngalaxy magnitudes"]
+        IN3["Open-Meteo\nhourly forecasts"]
+        IN4["GRB Catalog\nFermi/Swift positions"]
+        IN5["Moon ephemeris\nphase + separation"]
+    end
+
+    subgraph OUTPUT["Scoring Output"]
+        RANK["Ranked candidates\ntop 5 by composite score"]
+        BREAKDOWN["ScoreBreakdown\nper-candidate audit trail\nall terms + weights"]
+        PRIORITY["Normalized priority\n0.0 to 1.0 per candidate"]
+    end
+
+    IN1 --> T1
+    IN2 --> T2
+    IN3 --> T3
+    IN3 --> T4
+    IN4 --> T5
+    IN1 --> T6
+    IN5 --> T7
+
+    T1 --> RANK
+    T2 --> RANK
+    T3 --> RANK
+    T4 --> RANK
+    T5 --> RANK
+    T6 --> RANK
+    T7 --> RANK
+
+    RANK --> BREAKDOWN
+    RANK --> PRIORITY
+
+    style FORMULA fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    style TERMS fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000
+    style INPUTS fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style OUTPUT fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000

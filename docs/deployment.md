@@ -6,44 +6,68 @@ This document outlines the steps and environment variables required to deploy Ki
 
 ```
 KiloNOVAScout/
-├── .gitignore
+├── .env.example
 ├── Dockerfile
+├── LICENSE                    # Apache 2.0
 ├── README.md
 ├── docs/
 │   ├── architecture.md
-│   └── deployment.md
+│   ├── deployment.md
+│   ├── assets/                # Generated diagrams (PNG)
+├── config/
+│   └── scoring_weights.json   # Scoring formula weights
+├── scripts/                   # Validation scripts
+│   ├── check_event_classes.py
+│   ├── check_llm_parse.py
+│   ├── check_notifier.py
+│   ├── check_gracedb_poller.py
+│   ├── check_live_path.py
+│   └── generate_diagrams.py
 ├── src/
 │   ├── backend/
 │   │   ├── __init__.py
-│   │   ├── agent.py
-│   │   ├── main.py
-│   │   ├── models.py
-│   │   ├── simulator.py
-│   │   ├── tools.py
+│   │   ├── main.py            # FastAPI app
+│   │   ├── models.py          # Pydantic models
+│   │   ├── event_classes.py   # BNS/GRB/neutrino gates
+│   │   ├── gcn_listener.py    # Kafka consumer
+│   │   ├── gracedb_poller.py  # GraceDB REST poller
+│   │   ├── historical.py      # Historical event corpus
+│   │   ├── llm_reasoner.py    # LLM reasoning + fallback
+│   │   ├── llm_advisors.py    # Per-stage LLM advisors
+│   │   ├── notifier.py        # Webhook + email alerts
+│   │   ├── run_registry.py    # In-memory run history
+│   │   ├── agents/
+│   │   │   ├── agent.py       # Master orchestrator
+│   │   │   ├── healpix_agent.py
+│   │   │   ├── galaxy_agent.py
+│   │   │   ├── weather_agent.py
+│   │   │   ├── ephemeris_agent.py
+│   │   │   ├── scheduler_agent.py
+│   │   │   ├── validator_agent.py
+│   │   │   ├── visualization_agent.py
+│   │   │   ├── writer_agent.py
+│   │   │   ├── notification_agent.py
+│   │   │   └── subagents/     # Hook-gated specialists
+│   │   ├── tools/             # 18 Strands @tool functions
+│   │   ├── data/              # Bundled replay data
+│   │   ├── simulator/         # EventSimulator
 │   │   └── requirements.txt
 │   └── frontend/
 │       ├── index.html
 │       ├── package.json
-│       ├── postcss.config.js
-│       ├── public/
-│       │   └── favicon.svg
-│       ├── src/
-│       │   ├── App.jsx
-│       │   ├── components/
-│       │   │   ├── ArchitectureSection.jsx
-│       │   │   ├── DashboardSection.jsx
-│       │   │   ├── Footer.jsx
-│       │   │   ├── HeroSection.jsx
-│       │   │   ├── MissionSection.jsx
-│       │   │   └── StarfieldBackground.jsx
-│       │   ├── index.css
-│       │   └── main.jsx
 │       ├── tailwind.config.js
-│       └── vite.config.js
-└── version-docs/
-    ├── guide.md
-    ├── KiloNOVAScout.md
-    └── QnA.md
+│       ├── vite.config.js
+│       └── src/
+│           ├── App.jsx
+│           └── components/
+│               ├── DashboardSection.jsx
+│               ├── HistoricalSection.jsx
+│               ├── ObservatorySection.jsx
+│               ├── EventClassesSection.jsx
+│               ├── ArchitectureSection.jsx
+│               ├── AgentTerminal.jsx
+│               ├── HeroSection.jsx
+│               └── Footer.jsx
 ```
 
 ## 2. Backend Setup (FastAPI)
@@ -68,34 +92,35 @@ Render requires certain environment variables to be set for your application to 
 
 ### Required Environment Variables:
 
-- **`LLM_MODEL`**: Specifies the language model to use. For free tier, use one of the following:
-  - `google/gemini-1.5-flash` (Recommended for free tier)
-  - `groq/llama3-8b-8192` (Requires Groq API key, check free tier limits)
-  - `ollama/llama3` (If running Ollama locally, not applicable for Render deployment unless Ollama is hosted separately).
-  *Default if not set:* `google/gemini-1.5-flash`
-
-- **`OBSERVATORY_NAME`**: The name of the observatory to use for weather checks.
-  *Default if not set:* `Palomar`
-
-- **`OBSERVATORY_LAT`**: The latitude of the observatory in decimal degrees.
-  *Default if not set:* `33.356` (for Palomar Observatory)
-
-- **`OBSERVATORY_LON`**: The longitude of the observatory in decimal degrees.
-  *Default if not set:* `-116.865` (for Palomar Observatory)
+- **`PRIMARY_LLM`**: Primary LLM model ID. Default: `gemini/gemini-2.5-flash`
+- **`FALLBACK_LLM`**: Fallback LLM model ID. Default: `groq/openai/gpt-oss-120b`
+- **`GEMINI_API_KEY`**: Google AI Studio API key (free) — required for LLM reasoning.
+- **`GROQ_API_KEY`**: Groq Cloud API key (free) — required for LLM fallback.
+- **`OBSERVATORY_NAME`**: Observatory name. Default: `Palomar`
+- **`OBSERVATORY_LAT`**: Latitude in decimal degrees. Default: `33.356`
+- **`OBSERVATORY_LON`**: Longitude in decimal degrees. Default: `-116.865`
+- **`OBSERVATORY_ALT`**: Altitude in meters. Default: `1706`
 
 ### Optional Environment Variables:
 
-- **`LITELLM_API_KEY`**: If you are using a provider that requires an API key (e.g., Groq, OpenAI), you should set this. For Google AI Studio, no API key is typically needed if running through their hosted service or if LiteLLM handles authentication.
+- **`GCN_KAFKA_CLIENT_ID` / `GCN_KAFKA_CLIENT_SECRET`**: NASA GCN Kafka credentials (free at gcn.nasa.gov/quickstart) — required for live alerts.
+- **`GRACEDB_POLL`**: Set `true` for live BNS polling via GraceDB REST (no Kafka needed).
+- **`ALERT_WEBHOOK_URL`**: HTTPS endpoint for per-run alerts (Discord/Slack/ntfy.sh).
+- **`ALERT_EMAIL_ENABLED`**: Set `true` to mail reports on live triggers.
+- **`DIGEST_ENABLED`**: Set `true` for daily digest mail.
 
 ### Example Render Configuration:
 
 | Variable Name       | Value                                        |
 | :------------------ | :------------------------------------------- |
-| `LLM_MODEL`         | `google/gemini-1.5-flash`                    |
+| `PRIMARY_LLM`       | `gemini/gemini-2.5-flash`                    |
+| `FALLBACK_LLM`      | `groq/openai/gpt-oss-120b`                   |
+| `GEMINI_API_KEY`    | `YOUR_GOOGLE_AI_STUDIO_KEY`                  |
+| `GROQ_API_KEY`      | `YOUR_GROQ_API_KEY`                          |
 | `OBSERVATORY_NAME`  | `Palomar`                                    |
 | `OBSERVATORY_LAT`   | `33.356`                                     |
 | `OBSERVATORY_LON`   | `-116.865`                                   |
-| `LITELLM_API_KEY`   | `YOUR_API_KEY_HERE` (if applicable)          |
+| `OBSERVATORY_ALT`   | `1706`                                       |
 
 
 ## 6. Hosting on Render
