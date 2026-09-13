@@ -15,18 +15,20 @@ const CLASSES = [
   { id: 'grb', label: 'Gamma-ray bursts' },
   { id: 'neutrino', label: 'Neutrinos' },
 ]
-// Year window: Fermi-GBM era (2008) through the O5 horizon (2030).
-// The backend filter accepts any integers — widening the corpus never needs
-// a frontend change. Current corpus spans 2013 (GRB130427A) to 2022.
+// Year window: 1987 (first localizable transient, SN1987A) through the
+// current UTC year — the end advances on its own every January. See README
+// ("Why the historical archive starts in 1987") for the rationale.
+const YEAR_MIN = 1987
+const YEAR_MAX = new Date().getUTCFullYear()
 const YEARS = []
-for (let y = 2008; y <= 2030; y++) YEARS.push(y)
+for (let y = YEAR_MIN; y <= YEAR_MAX; y++) YEARS.push(y)
 
 const YEAR_SELECT = 'bg-black/40 border border-white/10 rounded px-2 py-1.5 text-white [&>option]:bg-[#0b0b16] [&>option]:text-gray-200'
 
 export function useHistoricalBatch({ onHistoricalRun } = {}) {
   const [classes, setClasses] = useState(['bns', 'grb', 'neutrino'])
-  const [startYear, setStartYear] = useState(2008)
-  const [endYear, setEndYear] = useState(2030)
+  const [startYear, setStartYear] = useState(YEAR_MIN)
+  const [endYear, setEndYear] = useState(YEAR_MAX)
   const [events, setEvents] = useState([])
   const [total, setTotal] = useState(0)
   const [selected, setSelected] = useState({})
@@ -36,6 +38,8 @@ export function useHistoricalBatch({ onHistoricalRun } = {}) {
   const [results, setResults] = useState([])
   const [analyzing, setAnalyzing] = useState(false)
   const [error, setError] = useState('')
+  const [liveTruncated, setLiveTruncated] = useState(false)
+  const [liveError, setLiveError] = useState('')
   const attachedRef = useRef({})
   const onRunRef = useRef(null)
   onRunRef.current = onHistoricalRun || null
@@ -58,6 +62,8 @@ export function useHistoricalBatch({ onHistoricalRun } = {}) {
       })
       setEvents(data.events || [])
       setTotal(data.total || 0)
+      setLiveTruncated(!!data.live_truncated)
+      setLiveError(data.live_error || '')
       const all = {}
       ;(data.events || []).forEach((e) => { all[e.event_id] = true })
       setSelected(all)
@@ -77,15 +83,22 @@ export function useHistoricalBatch({ onHistoricalRun } = {}) {
       const { data } = await axios.get(`/api/historical/batch/${bid}`, { params: { t: Date.now() } })
       setBatchStatus(data.status || '')
       setResults(data.results || [])
-      // Attach every new run to the SHARED AgentTerminal trace, exactly as
-      // if it had been launched — same SSE stream, same finish flow. The
-      // event id travels along so the terminal prints an event divider
-      // before the next workflow's steps.
-      ;(data.results || []).forEach((r) => {
-        if (r.run_id && !attachedRef.current[r.run_id] && onRunRef.current) {
-          attachedRef.current[r.run_id] = true
-          onRunRef.current(r.run_id, r.event_id)
+      const attach = (runId, eventId) => {
+        if (runId && !attachedRef.current[runId] && onRunRef.current) {
+          attachedRef.current[runId] = true
+          onRunRef.current(runId, eventId)
         }
+      }
+      // Attach the CURRENTLY RUNNING event first: its run_id is published
+      // the moment the pipeline starts, so the SSE trace streams realtime
+      // (same as LAUNCH) instead of arriving all at once at the end.
+      if (data.current && data.current.run_id) {
+        attach(data.current.run_id, data.current.event_id)
+      }
+      // Finished results as fallback (covers runs that completed between
+      // polls before their live attach happened).
+      ;(data.results || []).forEach((r) => {
+        attach(r.run_id, r.event_id)
       })
       if (data.status !== 'completed') {
         setTimeout(() => pollBatch(bid), 2000)
@@ -131,6 +144,7 @@ export function useHistoricalBatch({ onHistoricalRun } = {}) {
     classes, toggleClass, startYear, setStartYear, endYear, setEndYear,
     events, total, selected, toggleEvent, searching, search,
     batchId, batchStatus, results, analyzing, analyze, error, clear,
+    liveTruncated, liveError,
   }
 }
 
@@ -178,13 +192,26 @@ export function HistoricalSelector({ h, disabled }) {
       )}
       {h.events.length > 0 && (
         <>
-          <div className="font-mono text-[10px] text-gray-500 mb-2">{h.total} events found</div>
+          <div className="font-mono text-[10px] text-gray-500 mb-2">
+            {h.total} events found — BNS rows marked ● live come straight from NASA GraceDB for this range; archive rows are curated
+            {h.liveTruncated && (
+              <span className="text-amber-400 ml-1">⚠ live catalog truncated — narrow the range for full coverage</span>
+            )}
+            {h.liveError && (
+              <span className="text-red-400 ml-1">⚠ live lookup failed ({h.liveError}), curated only</span>
+            )}
+          </div>
           <div className="max-h-56 overflow-y-auto border border-white/10 rounded-lg mb-4">
             {h.events.map((e) => (
               <label key={e.event_id} className="flex items-center gap-2 px-3 py-2 border-b border-white/5 hover:bg-white/5 cursor-pointer">
                 <input type="checkbox" checked={!!h.selected[e.event_id]} onChange={() => h.toggleEvent(e.event_id)} disabled={disabled} className="accent-fuchsia-400" />
                 <span className="font-mono text-xs text-white">{e.event_id}</span>
                 <span className="font-mono text-[10px] px-1.5 py-px rounded border border-white/15 text-gray-300">{e.event_class}</span>
+                {e.origin === 'live' ? (
+                  <span className="font-mono text-[10px] px-1.5 py-px rounded border border-green-500/40 text-green-400 bg-green-500/10">● live</span>
+                ) : (
+                  <span className="font-mono text-[10px] px-1.5 py-px rounded border border-white/10 text-gray-500">archive</span>
+                )}
                 <span className="font-mono text-[11px] text-gray-400">{e.year}{e.distance_mpc ? ` · ${e.distance_mpc} Mpc` : ''}</span>
                 <a href={e.official_ref} target="_blank" rel="noreferrer" onClick={(ev) => ev.stopPropagation()} className="ml-auto font-mono text-[10px] text-cosmic-cyan hover:underline">official ↗</a>
               </label>

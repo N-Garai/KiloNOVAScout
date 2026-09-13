@@ -138,5 +138,61 @@
     "source": "icecube",
     "year": 2019,
     "official_ref": "https://gcn.nasa.gov/notices_amon/1357983832_79976.amon"
+  },
+  {
+    "event_id": "SN1987A",
+    "event_class": "neutrino",
+    "trigger_time": "1987-02-23T07:35:35Z",
+    "ra_deg": 83.87,
+    "dec_deg": -69.27,
+    "error_radius_deg": 5.0,
+    "distance_mpc": null,
+    "skymap_url": null,
+    "alert_properties": {"Signalness": 1.0, "Angular_Error": 5.0},
+    "source": "sn1987a",
+    "year": 1987,
+    "official_ref": "https://en.wikipedia.org/wiki/SN_1987A"
+  },
+  {
+    "event_id": "GRB970228",
+    "event_class": "grb",
+    "trigger_time": "1997-02-28T02:58:00Z",
+    "ra_deg": 75.44,
+    "dec_deg": 11.78,
+    "error_radius_deg": 3.0,
+    "distance_mpc": 4300.0,
+    "skymap_url": null,
+    "alert_properties": {"T90": 80.0, "Fluence": 1.1e-05, "Peak_Flux": 4.0, "Hardness": 0.8},
+    "source": "bepposax",
+    "year": 1997,
+    "official_ref": "https://en.wikipedia.org/wiki/GRB_970228"
+  },
+  {
+    "event_id": "GRB990123",
+    "event_class": "grb",
+    "trigger_time": "1999-01-23T09:46:56Z",
+    "ra_deg": 231.37,
+    "dec_deg": 44.77,
+    "error_radius_deg": 2.0,
+    "distance_mpc": 11800.0,
+    "skymap_url": null,
+    "alert_properties": {"T90": 63.0, "Fluence": 3.0e-04, "Peak_Flux": 1000.0, "Hardness": 1.2},
+    "source": "bepposax",
+    "year": 1999,
+    "official_ref": "https://en.wikipedia.org/wiki/GRB_990123"
+  },
+  {
+    "event_id": "GRB030329",
+    "event_class": "grb",
+    "trigger_time": "2003-03-29T11:37:14Z",
+    "ra_deg": 161.21,
+    "dec_deg": 21.52,
+    "error_radius_deg": 2.0,
+    "distance_mpc": 800.0,
+    "skymap_url": null,
+    "alert_properties": {"T90": 23.0, "Fluence": 1.6e-04, "Peak_Flux": 100.0, "Hardness": 1.0},
+    "source": "hete",
+    "year": 2003,
+    "official_ref": "https://en.wikipedia.org/wiki/GRB_030329"
   }
 ]

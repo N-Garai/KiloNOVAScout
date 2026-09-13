@@ -37,6 +37,7 @@ export default function ObservatorySection() {
   // unless being set — the backend never echoes them back).
   const [notify, setNotify] = useState({
     alert_webhook_url: '', alert_webhook_secret: '', alert_live_only: false,
+    alert_email_enabled: false,
     digest_enabled: false, digest_hour_utc: '6',
     digest_smtp_host: '', digest_smtp_port: '465', digest_smtp_user: '',
     digest_smtp_pass: '', digest_from: '', digest_to: '',
@@ -56,6 +57,7 @@ export default function ObservatorySection() {
       ...prev,
       alert_webhook_url: c.alert_webhook_url ?? prev.alert_webhook_url,
       alert_live_only: !!c.alert_live_only,
+      alert_email_enabled: !!c.alert_email_enabled,
       digest_enabled: !!c.digest_enabled,
       digest_hour_utc: c.digest_hour_utc ?? prev.digest_hour_utc,
       digest_smtp_host: c.digest_smtp_host ?? prev.digest_smtp_host,
@@ -196,6 +198,7 @@ export default function ObservatorySection() {
         alert_webhook_url: notify.alert_webhook_url,
         alert_webhook_secret: notify.alert_webhook_secret || undefined,
         alert_live_only: !!notify.alert_live_only,
+        alert_email_enabled: !!notify.alert_email_enabled,
         digest_enabled: !!notify.digest_enabled,
         digest_hour_utc: numOrUndef(notify.digest_hour_utc),
         digest_smtp_host: notify.digest_smtp_host,
@@ -571,7 +574,7 @@ export default function ObservatorySection() {
 
             <div className="md:col-span-2 border-t border-white/10 my-1" />
 
-            <div className="mb-5 flex items-end pb-1">
+            <div className="mb-5 flex flex-col gap-3 pb-1">
               <label className="flex items-center gap-3 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -581,6 +584,17 @@ export default function ObservatorySection() {
                 />
                 <span className="font-mono text-xs text-gray-300">
                   Daily digest mail <span className="text-gray-500">(runs + report links, once per day)</span>
+                </span>
+              </label>
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={!!notify.alert_email_enabled}
+                  onChange={(e) => setNotifyField('alert_email_enabled', e.target.checked)}
+                  className="w-4 h-4 accent-emerald-400"
+                />
+                <span className="font-mono text-xs text-gray-300">
+                  Alert on genuine trigger <span className="text-gray-500">(full report attached, live runs only)</span>
                 </span>
               </label>
             </div>

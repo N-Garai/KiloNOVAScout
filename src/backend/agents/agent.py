@@ -109,16 +109,19 @@ async def _attach_weather_tier(run_id: str) -> None:
 
 
 async def _notify_run_complete(run_id: str) -> None:
-    """Fire the outbound webhook for a finished run (24/7 alerting).
+    """Fire outbound notifications for a finished run (24/7 alerting).
 
-    Never raises and never blocks the loop: network I/O runs in a worker
-    thread, and a missing ALERT_WEBHOOK_URL is a silent no-op.
+    Webhook first, then the live-alert email (report attached, live runs
+    only and only when ALERT_EMAIL_ENABLED). Never raises and never blocks
+    the loop: network I/O plus report rendering run in worker threads, and
+    missing configuration is a silent no-op.
     """
     try:
-        from ..notifier import maybe_notify
+        from ..notifier import maybe_notify, send_live_alert_email
         rec = await run_registry.get_record(run_id)
         if rec is not None:
             await asyncio.to_thread(maybe_notify, rec)
+            await asyncio.to_thread(send_live_alert_email, rec)
     except Exception as exc:
         print(f"[ALERT] notify wrapper failed ({exc})")
 
@@ -496,20 +499,31 @@ class KilonovaScoutAgent(Agent):
 
     @_exclusive_run
     async def run_historical_event(self, event_id: str, run: Optional[RunRecord] = None) -> AgentOutput:
-        """Retrospective analysis of one curated historical event (v4 M17).
+        """Retrospective analysis of one historical event (v4 M17).
 
-        The event already happened: its skymap URL / position / alert
-        properties come from data/historical_events.json (official links),
-        so there is no live-check and no live→mock fallback chain — the DAG
-        runs once on trusted data. Official skymap FITS is downloaded at
-        analysis time by the existing DAG stage (bundled replay covers dead
-        links, honestly labeled per stage).
+        The event already happened: curated entries carry official links from
+        data/historical_events.json, live GraceDB finds resolve their flat
+        skymap above. Either way there is no live-check and no live→mock
+        fallback chain — the DAG runs once on the event's own data, with the
+        honest per-stage fallback tiers covering dead links.
         """
-        from ..historical import build_payload, get_event
+        from ..historical import build_payload, get_event, resolve_live_skymap
         entry = get_event(event_id)
         if entry is None:
             return AgentOutput(message=f"Unknown historical event '{event_id}'.",
                                details={"error": "unknown_event"}, action_status="failure")
+        # Live GraceDB finds carry no FITS URL (just the event id): resolve
+        # the flat bayestar file once, now, in a worker thread. Any failure
+        # leaves skymap_url empty and the DAG's honest replay fallback covers
+        # it exactly like curated entries with dead links.
+        if entry.get("origin") == "live" and not entry.get("skymap_url"):
+            try:
+                url = await asyncio.to_thread(resolve_live_skymap, event_id)
+            except Exception:
+                url = None
+            if url:
+                entry = dict(entry)
+                entry["skymap_url"] = url
         payload = build_payload(entry)
         if run is None:
             run = await run_registry.create_run(

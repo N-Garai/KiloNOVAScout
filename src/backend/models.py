@@ -145,6 +145,7 @@ class ObservatoryConfig(BaseModel):
     alert_webhook_url: Optional[str] = Field(default=None, description="Webhook URL for run alerts.")
     alert_webhook_secret: Optional[str] = Field(default=None, description="Bearer secret for webhook alerts.")
     alert_live_only: Optional[bool] = Field(default=None, description="Notify only on genuine triggers.")
+    alert_email_enabled: Optional[bool] = Field(default=None, description="Mail the full report on genuine (live) triggers.")
     digest_enabled: Optional[bool] = Field(default=None, description="Send the daily digest mail.")
     digest_hour_utc: Optional[int] = Field(default=None, description="UTC hour (0-23) for the digest.")
     digest_smtp_host: Optional[str] = Field(default=None, description="Digest SMTP host.")

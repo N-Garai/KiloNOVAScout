@@ -31,6 +31,14 @@ Beyond neutron-star mergers, the agent triages three cosmic trigger families end
 
 Users choose what to be alerted on two ways: **Live watch** toggles in the demo section (persisted to backend config, listener resubscribes without restart) and a **demo trigger-class picker** (`POST /api/simulate-event?event_class=grb`). `GET /api/event-classes` lists families, enablement, and subscribed topics.
 
+### Historical analysis
+
+Beside the live demo, the dashboard offers **retrospective analysis of real past events**: pick classes + a year range, search, tick events, and launch a batch. Every event runs through the identical pipeline (same scoring, same report, same approval flow) — only the provenance label differs (`historical:<ID>`). BNS rows marked ● live are queried **live from the NASA GraceDB significant-superevent catalog** for the chosen range (each links to its official superevent page); GRB/neutrino rows come from a curated archive (`src/backend/data/historical_events.json`) because no stable anonymous JSON catalog exists for those yet — the origin badge says which is which. Batch traces stream into the shared Agent Observatory in realtime, results compare side by side, and each row opens its own full report.
+
+#### Why the historical archive starts in 1987
+
+There are no localizable transients in these three classes before 1987: gravitational-wave detectors did not exist (first detection 2015), gamma-ray burst positions did not exist before BeppoSAX localized GRB 970228 (1997), and neutrino telescopes did not exist before SN 1987A — the February 1987 MeV burst seen by IMB/Kamiokande/Baksan, which opens the archive. The year picker therefore runs 1987 → current year (the end advances automatically). Anything earlier would be an empty search by construction, not a data gap.
+
 ### v2
 
 - DAG-style orchestration (ingest → skymap → catalog‖weather → GRB validation → scheduler → LLM rationale → human approval)
@@ -134,6 +142,9 @@ docker run -p 8000:8000 kilonovascout
 | GET | `/agent/state` | Current agent state |
 | GET | `/agent/status` | Status summary |
 | POST | `/agent/approve-slew-script` | Approve the slew script |
+| GET | `/api/historical/events` | Search past events by class + year range (live GraceDB BNS + curated archive) |
+| POST | `/api/historical/analyze` | Run a retrospective batch over event IDs |
+| GET | `/api/historical/batch/{batch_id}` | Batch status + per-event comparison table |
 | GET | `/health` | Health check |
 
 ## Configuration
@@ -158,6 +169,7 @@ docker run -p 8000:8000 kilonovascout
 | `ALERT_WEBHOOK_URL` | No | — | HTTPS endpoint receiving a JSON POST on every finished run (Discord/Slack webhook, ntfy.sh topic, PagerDuty) |
 | `ALERT_WEBHOOK_SECRET` | No | — | Optional Bearer token sent with webhook alerts (skipped for ntfy.sh) |
 | `ALERT_LIVE_ONLY` | No | `false` | Set `true` to notify only on genuine triggers (mock/demo runs skipped) |
+| `ALERT_EMAIL_ENABLED` | No | `false` | Set `true` to mail the full report (Markdown + HTML attached) to `DIGEST_TO` the moment a genuine live trigger finishes; mock/demo/historical runs never mail |
 | `DIGEST_ENABLED` | No | `false` | Set `true` for the daily digest mail |
 | `DIGEST_HOUR_UTC` | No | `6` | Hour of day (UTC, 0–23) the digest is sent |
 | `DIGEST_SMTP_HOST` / `DIGEST_SMTP_PORT` | With digest | — | SMTP server, e.g. `smtp.gmail.com` / `465` (SSL) |

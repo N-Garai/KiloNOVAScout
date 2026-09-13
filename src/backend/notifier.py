@@ -42,6 +42,7 @@ _RUNTIME_PREFS: Dict[str, str] = {}
 # Config keys the UI may manage (secrets handled separately — see below).
 PREF_KEYS = (
     "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_SECRET", "ALERT_LIVE_ONLY",
+    "ALERT_EMAIL_ENABLED",
     "DIGEST_ENABLED", "DIGEST_HOUR_UTC",
     "DIGEST_SMTP_HOST", "DIGEST_SMTP_PORT", "DIGEST_SMTP_USER",
     "DIGEST_SMTP_PASS", "DIGEST_FROM", "DIGEST_TO",
@@ -223,6 +224,101 @@ def maybe_notify(record: Any) -> bool:
         return bool(ok)
     except Exception as exc:
         print(f"[ALERT] webhook failed ({exc})")
+        return False
+
+
+def _live_email_enabled() -> bool:
+    """Per-alert live email toggle (independent of the daily digest)."""
+    return get_setting("ALERT_EMAIL_ENABLED").lower() in ("1", "true", "yes")
+
+
+def build_live_alert_message(record: Any, report_markdown: str = "",
+                             report_html: str = "") -> EmailMessage:
+    """Build the per-alert live email: summary + full report attached.
+
+    Pure constructor (no I/O) so content is unit-testable. The Markdown
+    report always attaches; the HTML twin attaches when available.
+    """
+    payload = build_alert_payload(record)
+    rid = payload.get("run_id") or "unknown"
+    msg = EmailMessage()
+    msg["Subject"] = f"[KilonovaScout] LIVE {payload.get('event_class') or 'event'} " \
+                     f"{payload.get('trigger_id') or payload.get('ivorn') or ''}".strip()
+    gate = payload.get("gate") or {}
+    top = payload.get("top_candidate") or {}
+    lines = [
+        "A genuine trigger just ran through the full pipeline.",
+        "",
+        f"Event: {payload.get('event_class')} {payload.get('trigger_id') or payload.get('ivorn') or ''}",
+        f"Gate: {gate.get('status')} — {gate.get('reason')} (confidence {gate.get('confidence')})",
+        f"Top candidate: {top.get('name')} "
+        f"(S={top.get('composite_score')}, {top.get('distance_mpc')} Mpc)" if top else "Top candidate: none",
+        f"Candidates: {payload.get('candidates')}, dome safe: {payload.get('dome_safe')}",
+        f"Provenance: {payload.get('provenance')}",
+        f"Full report: {payload.get('report_url')}",
+        "",
+        "The complete follow-up report is attached (Markdown"
+        + (" + HTML" if report_html else "") + ").",
+        "Robotic follow-up is pending your approval — open the dashboard to approve.",
+    ]
+    msg.set_content("\n".join(lines))
+    if report_markdown:
+        msg.add_attachment(report_markdown.encode("utf-8"), maintype="text",
+                           subtype="markdown", filename=f"kilonovascout-{rid}.md")
+    if report_html:
+        msg.add_attachment(report_html.encode("utf-8"), maintype="text",
+                           subtype="html", filename=f"kilonovascout-{rid}.html")
+    return msg
+
+
+def send_live_alert_email(record: Any) -> bool:
+    """Mail the full report the moment a GENUINE trigger finishes. Never raises.
+
+    Fires only when ALERT_EMAIL_ENABLED is on AND the run source is live —
+    demos, mocks and historical replays never mail anyone. SMTP comes from
+    the same settings as the digest (DIGEST_SMTP_*/DIGEST_TO). Callers must
+    run this in a worker thread: report rendering is slow, pipeline never waits.
+    """
+    if not _live_email_enabled():
+        return False
+    if _get_dict_attr(record, "source") != "live":
+        return False
+    cfg = _smtp_config()
+    if not cfg:
+        print("[ALERT-MAIL] ALERT_EMAIL_ENABLED but SMTP not configured; skipping")
+        return False
+    try:
+        from .agents.writer_agent import (
+            build_report_html,
+            build_report_markdown as build_writer_markdown,
+        )
+        try:
+            from config import load_scoring_weights as _loader
+            weights = _loader()
+        except Exception:
+            weights = {}
+        markdown = build_writer_markdown(record, weights)
+        try:
+            html_doc = build_report_html(
+                record, weights,
+                visualizations=_get_dict_attr(record, "visualizations", {}) or {})
+        except Exception:
+            html_doc = ""
+    except Exception as exc:
+        print(f"[ALERT-MAIL] report render failed ({exc})")
+        return False
+    try:
+        msg = build_live_alert_message(record, markdown, html_doc or "")
+        msg["From"] = cfg["from_addr"]
+        msg["To"] = ", ".join(cfg["to"])
+        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=20) as smtp:
+            smtp.login(cfg["user"], cfg["password"])
+            smtp.send_message(msg)
+        print(f"[ALERT-MAIL] live report mailed to {len(cfg['to'])} recipient(s) "
+              f"for run {_get_dict_attr(record, 'run_id')}")
+        return True
+    except Exception as exc:
+        print(f"[ALERT-MAIL] send failed ({exc})")
         return False
 
 

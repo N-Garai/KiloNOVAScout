@@ -358,6 +358,7 @@ def _notification_prefs_response() -> dict:
         "alert_webhook_url": snap.get("ALERT_WEBHOOK_URL", ""),
         "alert_webhook_secret": "",
         "alert_live_only": _truthy("ALERT_LIVE_ONLY"),
+        "alert_email_enabled": _truthy("ALERT_EMAIL_ENABLED"),
         "digest_enabled": _truthy("DIGEST_ENABLED"),
         "digest_hour_utc": max(0, min(23, _pint("DIGEST_HOUR_UTC", 6))),
         "digest_smtp_host": snap.get("DIGEST_SMTP_HOST", ""),
@@ -421,6 +422,8 @@ async def update_agent_config(config: ObservatoryConfig):
             incoming["ALERT_WEBHOOK_SECRET"] = config.alert_webhook_secret
         if config.alert_live_only is not None:
             incoming["ALERT_LIVE_ONLY"] = "true" if config.alert_live_only else "false"
+        if config.alert_email_enabled is not None:
+            incoming["ALERT_EMAIL_ENABLED"] = "true" if config.alert_email_enabled else "false"
         if config.digest_enabled is not None:
             incoming["DIGEST_ENABLED"] = "true" if config.digest_enabled else "false"
         if config.digest_hour_utc is not None:
@@ -743,25 +746,36 @@ _historical_batches = {}
 
 
 @app.get("/api/historical/events")
-async def api_historical_events(event_class: str = "", start_year: int = 0, end_year: int = 0):
-    """List curated historical events, filtered by class and year range.
+async def api_historical_events(event_class: str = "", start_year: int = 0, end_year: int = 0,
+                                live: bool = True):
+    """Range search over real past events: LIVE NASA GraceDB (BNS) + curated archive.
 
-    Pure local-JSON filtering — no external calls, no latency. ``event_class``
-    accepts a comma-separated list (bns,grb,neutrino); empty means all.
+    With live=true (default), BNS matches are queried live from the GraceDB
+    significant-superevent catalog for the requested years (each row links to
+    its official superevent page); GRB/neutrino rows come from the curated
+    archive — no stable anonymous JSON catalog exists for those yet, and the
+    origin badge says so honestly. Every row carries ``origin`` ("live" or
+    "curated"). Any live failure degrades to curated only, never an error.
+    ``event_class`` accepts a comma-separated list (bns,grb,neutrino).
     """
     try:
-        from .historical import filter_events
+        from .historical import search_events
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"historical corpus unavailable: {exc}")
-    events = filter_events(
-        event_classes=event_class or None,
-        start_year=start_year or None,
-        end_year=end_year or None,
-    )
-    by_class: dict = {}
-    for e in events:
-        by_class[e.get("event_class", "?")] = by_class.get(e.get("event_class", "?"), 0) + 1
-    return _to_jsonable({"events": events, "total": len(events), "by_class": by_class})
+    try:
+        result = await asyncio.to_thread(
+            search_events,
+            event_class or None,
+            start_year or None,
+            end_year or None,
+            live,
+        )
+    except Exception as exc:
+        logger.warning(f"[API] historical search failed ({exc}); curated only")
+        from .historical import search_events as _search
+        result = _search(event_class or None, start_year or None,
+                         end_year or None, live=False)
+    return _to_jsonable(result)
 
 
 async def _run_historical_batch(batch_id: str, event_ids: list) -> None:
@@ -783,6 +797,11 @@ async def _run_historical_batch(batch_id: str, event_ids: list) -> None:
                 record = await run_registry.create_run(
                     source="historical", event={"event_class": "bns", "note": f"historical {eid} accepted"})
                 item["run_id"] = record.run_id
+                # Publish the live run the moment it starts so the UI can
+                # attach its SSE trace in realtime (same as LAUNCH). Without
+                # this the frontend only learns the run_id after the run
+                # finishes, and the whole trace arrives all at once.
+                batch["current"] = {"event_id": eid, "run_id": record.run_id, "status": "running"}
                 await kilonova_agent.run_historical_event(eid, run=record)
                 rec = await run_registry.get_record(record.run_id)
                 if rec is None:
@@ -812,9 +831,11 @@ async def _run_historical_batch(batch_id: str, event_ids: list) -> None:
         except Exception as exc:
             item.update(status="failed", error=str(exc)[:300])
         batch["results"].append(item)
+        batch["current"] = None
         done = len(batch["results"])
         batch["status"] = "running" if done < batch["total"] else "completed"
     batch["status"] = "completed"
+    batch["current"] = None
 
 
 @app.post("/api/historical/analyze", status_code=202)
@@ -841,7 +862,8 @@ async def api_historical_analyze(body: dict):
     import time as _time
     batch_id = f"batch-{int(_time.time() * 1000)}"
     _historical_batches[batch_id] = {"batch_id": batch_id, "status": "running",
-                                     "total": len(event_ids), "results": []}
+                                     "total": len(event_ids), "results": [],
+                                     "current": None}
     asyncio.create_task(_run_historical_batch(batch_id, list(event_ids)))
     return {"batch_id": batch_id, "total": len(event_ids), "status": "started"}
 
